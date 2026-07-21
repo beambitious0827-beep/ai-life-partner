@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 
+import 'support_preference_page.dart';
+
 class GoalDefinitionPage extends StatefulWidget {
   const GoalDefinitionPage({
     super.key,
@@ -81,38 +83,48 @@ class _GoalDefinitionPageState extends State<GoalDefinitionPage> {
     }
   }
 
-  void _goToNextStep() {
-    final goals = <String>[];
+  Map<String, String> _collectGoals() {
+    final goals = <String, String>{};
 
     if (widget.selectedAreas.isEmpty) {
       final generalGoal = _generalGoalController.text.trim();
 
       if (generalGoal.isNotEmpty) {
-        goals.add(generalGoal);
+        goals['全体'] = generalGoal;
       }
-    } else {
-      for (final area in widget.selectedAreas) {
-        final goal = _goalControllers[area]?.text.trim() ?? '';
 
-        if (goal.isNotEmpty) {
-          goals.add('$area：$goal');
-        }
+      return goals;
+    }
+
+    for (final area in widget.selectedAreas) {
+      final goal = _goalControllers[area]?.text.trim() ?? '';
+
+      if (goal.isNotEmpty) {
+        goals[area] = goal;
       }
     }
 
-    ScaffoldMessenger.of(
-      context,
-    ).showSnackBar(SnackBar(content: Text('${goals.length}件の目標を入力しました')));
+    return goals;
+  }
 
-    // 次の工程で「希望する支援方法」の画面へ接続します。
+  void _openSupportPreference(Map<String, String> goals) {
+    Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (context) => SupportPreferencePage(
+          displayName: widget.displayName,
+          selectedAreas: widget.selectedAreas,
+          goals: goals,
+        ),
+      ),
+    );
+  }
+
+  void _goToNextStep() {
+    _openSupportPreference(_collectGoals());
   }
 
   void _skipForNow() {
-    ScaffoldMessenger.of(
-      context,
-    ).showSnackBar(const SnackBar(content: Text('目標はあとから設定できます')));
-
-    // 次の工程で「希望する支援方法」の画面へ接続します。
+    _openSupportPreference(const <String, String>{});
   }
 
   Widget _buildGeneralGoalField() {
