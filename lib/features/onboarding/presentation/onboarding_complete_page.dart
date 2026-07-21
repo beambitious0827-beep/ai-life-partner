@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 
+import '../../home/presentation/home_page.dart';
+
 class OnboardingCompletePage extends StatelessWidget {
   const OnboardingCompletePage({
     super.key,
@@ -103,11 +105,17 @@ class OnboardingCompletePage extends StatelessWidget {
   }
 
   void _startApp(BuildContext context) {
-    ScaffoldMessenger.of(
-      context,
-    ).showSnackBar(const SnackBar(content: Text('初期設定が完了しました。次はホーム画面へ接続します')));
-
-    // 次の工程でAI Life Partnerのホーム画面へ接続します。
+    Navigator.of(context).pushAndRemoveUntil(
+      MaterialPageRoute<void>(
+        builder: (context) => HomePage(
+          displayName: displayName,
+          selectedAreas: selectedAreas,
+          goals: goals,
+          supportPreferences: supportPreferences,
+        ),
+      ),
+      (route) => false,
+    );
   }
 
   @override
