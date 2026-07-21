@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 
+import '../../onboarding/presentation/about_you_page.dart';
+
 class WelcomePage extends StatelessWidget {
   const WelcomePage({super.key});
 
@@ -47,8 +49,10 @@ class WelcomePage extends StatelessWidget {
                     width: double.infinity,
                     child: FilledButton(
                       onPressed: () {
-                        ScaffoldMessenger.of(context).showSnackBar(
-                          const SnackBar(content: Text('次は初期設定画面へ進みます')),
+                        Navigator.of(context).push(
+                          MaterialPageRoute<void>(
+                            builder: (context) => const AboutYouPage(),
+                          ),
                         );
                       },
                       child: const Padding(
