@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 
+import 'goal_definition_page.dart';
+
 enum FocusArea { learning, training, nutrition, sleep, work, hobby, other }
 
 extension FocusAreaView on FocusArea {
@@ -74,22 +76,30 @@ class _FocusSelectionPageState extends State<FocusSelectionPage> {
     });
   }
 
+  List<String> get _selectedLabels {
+    return FocusArea.values
+        .where(_selectedAreas.contains)
+        .map((area) => area.label)
+        .toList();
+  }
+
+  void _openGoalDefinition(List<String> selectedAreas) {
+    Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (context) => GoalDefinitionPage(
+          displayName: widget.displayName,
+          selectedAreas: selectedAreas,
+        ),
+      ),
+    );
+  }
+
   void _goToNextStep() {
-    final selectedLabels = _selectedAreas.map((area) => area.label).join('、');
-
-    ScaffoldMessenger.of(
-      context,
-    ).showSnackBar(SnackBar(content: Text('$selectedLabelsを選択しました')));
-
-    // 次の工程で「どのようになりたいですか」の画面へ接続します。
+    _openGoalDefinition(_selectedLabels);
   }
 
   void _skipForNow() {
-    ScaffoldMessenger.of(
-      context,
-    ).showSnackBar(const SnackBar(content: Text('取り組んでいることは、あとから設定できます')));
-
-    // 次の工程で「どのようになりたいですか」の画面へ接続します。
+    _openGoalDefinition(const <String>[]);
   }
 
   @override
