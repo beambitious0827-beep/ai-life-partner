@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 
+import 'focus_selection_page.dart';
+
 class AboutYouPage extends StatefulWidget {
   const AboutYouPage({super.key});
 
@@ -16,6 +18,14 @@ class _AboutYouPageState extends State<AboutYouPage> {
     super.dispose();
   }
 
+  void _openFocusSelection(String? displayName) {
+    Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (context) => FocusSelectionPage(displayName: displayName),
+      ),
+    );
+  }
+
   void _goToNextStep() {
     final displayName = _displayNameController.text.trim();
 
@@ -26,19 +36,11 @@ class _AboutYouPageState extends State<AboutYouPage> {
       return;
     }
 
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text('$displayNameさん、次は取り組んでいることを教えてください')),
-    );
-
-    // 次の工程で「取り組んでいること」の画面へ接続します。
+    _openFocusSelection(displayName);
   }
 
   void _skipForNow() {
-    ScaffoldMessenger.of(
-      context,
-    ).showSnackBar(const SnackBar(content: Text('呼び名はあとから設定できます')));
-
-    // 次の工程で「取り組んでいること」の画面へ接続します。
+    _openFocusSelection(null);
   }
 
   @override
@@ -80,7 +82,9 @@ class _AboutYouPageState extends State<AboutYouPage> {
                       helperText: '本名でなくても大丈夫です。あとから変更できます。',
                       border: OutlineInputBorder(),
                     ),
-                    onSubmitted: (_) => _goToNextStep(),
+                    onSubmitted: (_) {
+                      _goToNextStep();
+                    },
                   ),
                   const SizedBox(height: 32),
                   FilledButton(
