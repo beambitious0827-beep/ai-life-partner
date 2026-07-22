@@ -1,3 +1,6 @@
+import 'package:ai_life_partner/features/calendar/data/in_memory_calendar_repository.dart';
+import 'package:ai_life_partner/features/calendar/domain/repositories/calendar_repository.dart';
+import 'package:ai_life_partner/features/calendar/presentation/calendar_page.dart';
 import 'package:ai_life_partner/features/next_step/presentation/next_step_page.dart';
 import 'package:flutter/material.dart';
 
@@ -20,6 +23,10 @@ class HomePage extends StatefulWidget {
 }
 
 class _HomePageState extends State<HomePage> {
+  static const String _humanId = 'local-human';
+
+  final CalendarRepository _calendarRepository = InMemoryCalendarRepository();
+
   String? _todayAction;
 
   String get _name {
@@ -56,6 +63,15 @@ class _HomePageState extends State<HomePage> {
     setState(() {
       _todayAction = action.trim();
     });
+  }
+
+  Future<void> _openCalendar() async {
+    await Navigator.of(context).push<void>(
+      MaterialPageRoute<void>(
+        builder: (context) =>
+            CalendarPage(repository: _calendarRepository, humanId: _humanId),
+      ),
+    );
   }
 
   Widget _buildSection({
@@ -337,6 +353,15 @@ class _HomePageState extends State<HomePage> {
                     spacing: 12,
                     runSpacing: 12,
                     children: [
+                      _buildQuickAction(
+                        context: context,
+                        icon: Icons.calendar_month_outlined,
+                        title: 'カレンダー',
+                        description: '月の予定を確認し、日ごとの時間を整理します。',
+                        onTap: () {
+                          _openCalendar();
+                        },
+                      ),
                       _buildQuickAction(
                         context: context,
                         icon: Icons.route_outlined,
