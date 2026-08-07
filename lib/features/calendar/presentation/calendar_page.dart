@@ -149,32 +149,50 @@ class _CalendarPageState extends State<CalendarPage> {
     return '$start - $end';
   }
 
-  /// 選択している日付を初期値としてEvent Editorを開く。
-  ///
-  /// 保存された場合のみCalendarEventが返るため、
-  /// キャンセルや戻る操作では予定を再取得しない。
+  /// 選択している日付を初期値として、新規登録モードのEvent Editorを開く。
   Future<void> _openEventEditor() async {
-    final savedEvent = await Navigator.of(context).push<CalendarEvent>(
-      MaterialPageRoute<CalendarEvent>(
+    await _openEditor();
+  }
+
+  /// 一覧で選ばれた予定を、編集モードのEvent Editorで開く。
+  Future<void> _editEvent(CalendarEvent event) async {
+    await _openEditor(initialEvent: event);
+  }
+
+  /// Event Editorを開き、確定された結果だけを画面へ反映する。
+  ///
+  /// 保存または削除が確定した場合のみEventEditorResultが返るため、
+  /// キャンセルや戻る操作では予定を再取得しない。
+  Future<void> _openEditor({CalendarEvent? initialEvent}) async {
+    final result = await Navigator.of(context).push<EventEditorResult>(
+      MaterialPageRoute<EventEditorResult>(
         builder: (context) => EventEditorPage(
           repository: widget.repository,
           humanId: widget.humanId,
           initialDate: _selectedDate,
+          initialEvent: initialEvent,
         ),
       ),
     );
 
-    if (!mounted || savedEvent == null) {
+    if (!mounted || result == null) {
       return;
     }
 
-    final savedDate = savedEvent.startAt;
+    if (result.isSaved) {
+      // 編集で日付が変わった場合でも、保存した予定が見えるように表示月を合わせる。
+      final savedDate = result.event.startAt;
 
-    setState(() {
-      _visibleMonth = DateTime(savedDate.year, savedDate.month);
+      setState(() {
+        _visibleMonth = DateTime(savedDate.year, savedDate.month);
 
-      _selectedDate = DateTime(savedDate.year, savedDate.month, savedDate.day);
-    });
+        _selectedDate = DateTime(
+          savedDate.year,
+          savedDate.month,
+          savedDate.day,
+        );
+      });
+    }
 
     await _loadMonthEvents();
 
@@ -182,9 +200,19 @@ class _CalendarPageState extends State<CalendarPage> {
       return;
     }
 
+    final String message;
+
+    if (result.isDeleted) {
+      message = '予定を削除しました。';
+    } else if (initialEvent != null) {
+      message = '予定を更新しました。';
+    } else {
+      message = '予定を登録しました。';
+    }
+
     ScaffoldMessenger.of(
       context,
-    ).showSnackBar(const SnackBar(content: Text('予定を登録しました。')));
+    ).showSnackBar(SnackBar(content: Text(message)));
   }
 
   Widget _buildMonthHeader() {
@@ -413,6 +441,7 @@ class _CalendarPageState extends State<CalendarPage> {
             else
               ...events.map((event) {
                 return Card(
+                  key: Key('calendar_event_card_${event.id}'),
                   margin: const EdgeInsets.only(bottom: 12),
                   child: ListTile(
                     leading: const Icon(Icons.event_outlined),
@@ -427,9 +456,7 @@ class _CalendarPageState extends State<CalendarPage> {
                     ),
                     isThreeLine: true,
                     onTap: () {
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        const SnackBar(content: Text('予定の編集画面は次の工程で追加します')),
-                      );
+                      _editEvent(event);
                     },
                   ),
                 );

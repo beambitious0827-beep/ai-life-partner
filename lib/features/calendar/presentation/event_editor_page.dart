@@ -6,16 +6,44 @@ import 'package:ai_life_partner/features/calendar/domain/repositories/calendar_r
 import 'package:ai_life_partner/features/calendar/presentation/event_schedule_input.dart';
 import 'package:flutter/material.dart';
 
-/// 予定を新しく登録するための画面。
+/// Event Editorで利用者が確定した操作。
+enum EventEditorAction { saved, deleted }
+
+/// Event Editorの結果。
 ///
-/// 保存に成功した場合は、登録したCalendarEventを返して閉じる。
-/// キャンセルや戻る操作の場合はnullを返し、何も保存しない。
+/// 保存と削除を呼び出し側で区別できるようにするために使用する。
+class EventEditorResult {
+  const EventEditorResult({required this.action, required this.event});
+
+  const EventEditorResult.saved(CalendarEvent event)
+    : this(action: EventEditorAction.saved, event: event);
+
+  const EventEditorResult.deleted(CalendarEvent event)
+    : this(action: EventEditorAction.deleted, event: event);
+
+  final EventEditorAction action;
+
+  /// 保存後、または削除した予定。
+  final CalendarEvent event;
+
+  bool get isSaved => action == EventEditorAction.saved;
+
+  bool get isDeleted => action == EventEditorAction.deleted;
+}
+
+/// 予定を新しく登録する画面、および既存の予定を編集する画面。
+///
+/// [initialEvent] を渡すと編集モードになり、渡さない場合は新規登録モードになる。
+///
+/// 利用者が保存または削除を確定した場合のみ [EventEditorResult] を返して閉じる。
+/// キャンセルや戻る操作の場合はnullを返し、何も保存・削除しない。
 class EventEditorPage extends StatefulWidget {
   const EventEditorPage({
     super.key,
     required this.repository,
     required this.humanId,
     required this.initialDate,
+    this.initialEvent,
   });
 
   final CalendarRepository repository;
@@ -23,8 +51,11 @@ class EventEditorPage extends StatefulWidget {
   /// CalendarPageから渡されるHuman ID。
   final String humanId;
 
-  /// CalendarPageで選択していた日付。
+  /// CalendarPageで選択していた日付。新規登録モードの初期日付になる。
   final DateTime initialDate;
+
+  /// 編集する既存の予定。nullの場合は新規登録モードになる。
+  final CalendarEvent? initialEvent;
 
   @override
   State<EventEditorPage> createState() => _EventEditorPageState();
@@ -57,15 +88,47 @@ class _EventEditorPageState extends State<EventEditorPage> {
   String? _scheduleErrorMessage;
   String? _saveErrorMessage;
 
+  /// 既存の予定を受け取っている場合は編集モードになる。
+  bool get _isEditing => widget.initialEvent != null;
+
   @override
   void initState() {
     super.initState();
 
+    final initialEvent = widget.initialEvent;
+
+    if (initialEvent == null) {
+      _date = DateTime(
+        widget.initialDate.year,
+        widget.initialDate.month,
+        widget.initialDate.day,
+      );
+
+      return;
+    }
+
+    // 編集モードでは、既存の予定の内容をそのまま初期値にする。
+    // 画面を開いただけでは、どの値も変更しない。
+    _titleController.text = initialEvent.title;
+    _descriptionController.text = initialEvent.description;
+
     _date = DateTime(
-      widget.initialDate.year,
-      widget.initialDate.month,
-      widget.initialDate.day,
+      initialEvent.startAt.year,
+      initialEvent.startAt.month,
+      initialEvent.startAt.day,
     );
+
+    _isAllDay = initialEvent.isAllDay;
+
+    if (!initialEvent.isAllDay) {
+      // 終日予定は時刻を持たないため、既定の時刻を残しておく。
+      // 終日をOFFに切り替えたときに、そのまま使える初期値になる。
+      _startTime = TimeOfDay.fromDateTime(initialEvent.startAt);
+      _endTime = TimeOfDay.fromDateTime(initialEvent.endAt);
+    }
+
+    _category = initialEvent.category;
+    _aiVisibility = initialEvent.aiVisibility;
   }
 
   @override
@@ -192,22 +255,7 @@ class _EventEditorPageState extends State<EventEditorPage> {
     final savedAt = DateTime.now();
 
     try {
-      final event = CalendarEvent(
-        id: _generateEventId(),
-        humanId: widget.humanId,
-        title: _titleController.text.trim(),
-        description: _descriptionController.text.trim(),
-        startAt: schedule.startAt,
-        endAt: schedule.endAt,
-        isAllDay: _isAllDay,
-        category: _category,
-        // Life Projectの正式なIDモデルが決まるまで、関連付けは行わない。
-        lifeProjectId: null,
-        aiVisibility: _aiVisibility,
-        source: CalendarSource.internal,
-        createdAt: savedAt,
-        updatedAt: savedAt,
-      );
+      final event = _buildEvent(schedule: schedule, savedAt: savedAt);
 
       await widget.repository.saveEvent(event);
 
@@ -215,7 +263,7 @@ class _EventEditorPageState extends State<EventEditorPage> {
         return;
       }
 
-      Navigator.of(context).pop(event);
+      Navigator.of(context).pop(EventEditorResult.saved(event));
     } on Object catch (_) {
       if (!mounted) {
         return;
@@ -224,6 +272,119 @@ class _EventEditorPageState extends State<EventEditorPage> {
       setState(() {
         _isSaving = false;
         _saveErrorMessage = '予定を保存できませんでした。もう一度お試しください。';
+      });
+    }
+  }
+
+  /// 入力内容から保存するCalendarEventを組み立てる。
+  ///
+  /// 編集モードでは、既存の予定のid、humanId、createdAt、lifeProjectId、
+  /// sourceを維持し、updatedAtだけを保存時点の日時へ更新する。
+  CalendarEvent _buildEvent({
+    required EventScheduleInput schedule,
+    required DateTime savedAt,
+  }) {
+    final title = _titleController.text.trim();
+    final description = _descriptionController.text.trim();
+
+    final initialEvent = widget.initialEvent;
+
+    if (initialEvent != null) {
+      return initialEvent.copyWith(
+        title: title,
+        description: description,
+        startAt: schedule.startAt,
+        endAt: schedule.endAt,
+        isAllDay: _isAllDay,
+        category: _category,
+        aiVisibility: _aiVisibility,
+        updatedAt: savedAt,
+      );
+    }
+
+    return CalendarEvent(
+      id: _generateEventId(),
+      humanId: widget.humanId,
+      title: title,
+      description: description,
+      startAt: schedule.startAt,
+      endAt: schedule.endAt,
+      isAllDay: _isAllDay,
+      category: _category,
+      // Life Projectの正式なIDモデルが決まるまで、関連付けは行わない。
+      lifeProjectId: null,
+      aiVisibility: _aiVisibility,
+      source: CalendarSource.internal,
+      createdAt: savedAt,
+      updatedAt: savedAt,
+    );
+  }
+
+  /// 削除は、利用者が確認ダイアログで明示的に選択した場合のみ実行する。
+  ///
+  /// ダイアログを閉じただけ、背景をタップしただけでは削除しない。
+  Future<void> _confirmDelete() async {
+    final initialEvent = widget.initialEvent;
+
+    if (initialEvent == null || _isSaving) {
+      return;
+    }
+
+    final shouldDelete = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) {
+        return AlertDialog(
+          title: const Text('この予定を削除しますか？'),
+          content: Text(
+            '「${initialEvent.title}」をカレンダーから削除します。\n'
+            '削除した予定は元に戻せません。',
+          ),
+          actions: [
+            TextButton(
+              key: const Key('event_editor_delete_cancel_button'),
+              onPressed: () {
+                Navigator.of(dialogContext).pop(false);
+              },
+              child: const Text('キャンセル'),
+            ),
+            FilledButton(
+              key: const Key('event_editor_delete_confirm_button'),
+              onPressed: () {
+                Navigator.of(dialogContext).pop(true);
+              },
+              child: const Text('削除する'),
+            ),
+          ],
+        );
+      },
+    );
+
+    if (!mounted || shouldDelete != true) {
+      return;
+    }
+
+    setState(() {
+      _isSaving = true;
+      _scheduleErrorMessage = null;
+      _saveErrorMessage = null;
+    });
+
+    try {
+      await widget.repository.deleteEvent(initialEvent.id);
+
+      if (!mounted) {
+        return;
+      }
+
+      Navigator.of(context).pop(EventEditorResult.deleted(initialEvent));
+    } on Object catch (_) {
+      if (!mounted) {
+        return;
+      }
+
+      setState(() {
+        _isSaving = false;
+        _saveErrorMessage = '予定を削除できませんでした。もう一度お試しください。';
       });
     }
   }
@@ -370,6 +531,7 @@ class _EventEditorPageState extends State<EventEditorPage> {
       runSpacing: 8,
       children: EventCategory.values.map((category) {
         return ChoiceChip(
+          key: Key('event_editor_category_${category.name}'),
           label: Text(category.label),
           selected: _category == category,
           onSelected: (isSelected) {
@@ -402,6 +564,7 @@ class _EventEditorPageState extends State<EventEditorPage> {
           final isSelected = _aiVisibility == visibility;
 
           return Card(
+            key: Key('event_editor_ai_visibility_${visibility.name}'),
             margin: const EdgeInsets.only(bottom: 10),
             color: isSelected ? colorScheme.primaryContainer : null,
             child: InkWell(
@@ -455,24 +618,42 @@ class _EventEditorPageState extends State<EventEditorPage> {
   }
 
   Widget _buildActions() {
-    return Row(
+    final colorScheme = Theme.of(context).colorScheme;
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        Expanded(
-          child: OutlinedButton(
-            key: const Key('event_editor_cancel_button'),
-            onPressed: _isSaving ? null : _cancel,
-            child: const Text('キャンセル'),
-          ),
+        Row(
+          children: [
+            Expanded(
+              child: OutlinedButton(
+                key: const Key('event_editor_cancel_button'),
+                onPressed: _isSaving ? null : _cancel,
+                child: const Text('キャンセル'),
+              ),
+            ),
+            const SizedBox(width: 16),
+            Expanded(
+              child: FilledButton.icon(
+                key: const Key('event_editor_save_button'),
+                onPressed: _isSaving ? null : _save,
+                icon: const Icon(Icons.check),
+                label: const Text('この予定を保存する'),
+              ),
+            ),
+          ],
         ),
-        const SizedBox(width: 16),
-        Expanded(
-          child: FilledButton.icon(
-            key: const Key('event_editor_save_button'),
-            onPressed: _isSaving ? null : _save,
-            icon: const Icon(Icons.check),
-            label: const Text('この予定を保存する'),
+        // 削除は既存の予定にだけ用意する。押しただけでは削除せず、確認を挟む。
+        if (_isEditing) ...[
+          const SizedBox(height: 24),
+          TextButton.icon(
+            key: const Key('event_editor_delete_button'),
+            onPressed: _isSaving ? null : _confirmDelete,
+            style: TextButton.styleFrom(foregroundColor: colorScheme.error),
+            icon: const Icon(Icons.delete_outline),
+            label: const Text('この予定を削除する'),
           ),
-        ),
+        ],
       ],
     );
   }
@@ -482,7 +663,7 @@ class _EventEditorPageState extends State<EventEditorPage> {
     final colorScheme = Theme.of(context).colorScheme;
 
     return Scaffold(
-      appBar: AppBar(title: const Text('予定を登録')),
+      appBar: AppBar(title: Text(_isEditing ? '予定を編集' : '予定を登録')),
       body: SafeArea(
         child: SingleChildScrollView(
           padding: const EdgeInsets.all(32),
@@ -495,14 +676,17 @@ class _EventEditorPageState extends State<EventEditorPage> {
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
                     Text(
-                      '予定を書き留める',
+                      _isEditing ? '予定を見直す' : '予定を書き留める',
                       style: Theme.of(context).textTheme.headlineMedium
                           ?.copyWith(fontWeight: FontWeight.bold),
                     ),
                     const SizedBox(height: 12),
                     Text(
-                      '登録した予定は、あなたのカレンダーに保存されます。'
-                      '保存するまで、何も記録されません。',
+                      _isEditing
+                          ? '内容を変更しても、保存するまでカレンダーは変わりません。'
+                                '戻る操作では、変更は保存されません。'
+                          : '登録した予定は、あなたのカレンダーに保存されます。'
+                                '保存するまで、何も記録されません。',
                       style: Theme.of(
                         context,
                       ).textTheme.bodyLarge?.copyWith(height: 1.7),
