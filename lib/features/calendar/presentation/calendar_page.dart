@@ -1,6 +1,9 @@
+import 'package:ai_life_partner/features/calendar/domain/models/available_time_window.dart';
 import 'package:ai_life_partner/features/calendar/domain/models/calendar_event.dart';
 import 'package:ai_life_partner/features/calendar/domain/models/event_category.dart';
 import 'package:ai_life_partner/features/calendar/domain/repositories/calendar_repository.dart';
+import 'package:ai_life_partner/features/calendar/domain/services/available_time_calculator.dart';
+import 'package:ai_life_partner/features/calendar/presentation/available_time_format.dart';
 import 'package:ai_life_partner/features/calendar/presentation/event_editor_page.dart';
 import 'package:flutter/material.dart';
 
@@ -19,6 +22,16 @@ class CalendarPage extends StatefulWidget {
 }
 
 class _CalendarPageState extends State<CalendarPage> {
+  /// v1で空き時間を算出する対象時間。
+  ///
+  /// 将来は起床時間、就寝時間、曜日、生活パターン、利用者の設定から決められるよう、
+  /// Calculatorへ固定せずCalendarPage側で範囲を組み立てている。
+  static const int _availabilityStartHour = 6;
+  static const int _availabilityEndHour = 23;
+
+  static const AvailableTimeCalculator _availableTimeCalculator =
+      AvailableTimeCalculator();
+
   late DateTime _visibleMonth;
   late DateTime _selectedDate;
 
@@ -91,6 +104,33 @@ class _CalendarPageState extends State<CalendarPage> {
       ..sort((first, second) => first.startAt.compareTo(second.startAt));
   }
 
+  /// 選択日の空き時間を、その時点の予定から都度算出する。
+  ///
+  /// 結果は保持しない。_monthEventsが再取得されれば表示も自動的に更新される。
+  /// 区間の統合や範囲外の除外はAvailableTimeCalculatorの責務なので、
+  /// ここでは対象範囲を組み立てて渡すだけにする。
+  List<AvailableTimeWindow> _availableTimesForSelectedDate() {
+    final rangeStart = DateTime(
+      _selectedDate.year,
+      _selectedDate.month,
+      _selectedDate.day,
+      _availabilityStartHour,
+    );
+
+    final rangeEnd = DateTime(
+      _selectedDate.year,
+      _selectedDate.month,
+      _selectedDate.day,
+      _availabilityEndHour,
+    );
+
+    return _availableTimeCalculator.calculate(
+      rangeStart: rangeStart,
+      rangeEnd: rangeEnd,
+      events: _monthEvents,
+    );
+  }
+
   Future<void> _moveMonth(int difference) async {
     final newMonth = DateTime(
       _visibleMonth.year,
@@ -140,13 +180,8 @@ class _CalendarPageState extends State<CalendarPage> {
       return '終日';
     }
 
-    final start =
-        '${_twoDigits(event.startAt.hour)}:${_twoDigits(event.startAt.minute)}';
-
-    final end =
-        '${_twoDigits(event.endAt.hour)}:${_twoDigits(event.endAt.minute)}';
-
-    return '$start - $end';
+    // 時刻の表記はavailable_time_formatと共通にしておく。
+    return '${formatClockTime(event.startAt)} - ${formatClockTime(event.endAt)}';
   }
 
   /// 選択している日付を初期値として、新規登録モードのEvent Editorを開く。
@@ -467,6 +502,93 @@ class _CalendarPageState extends State<CalendarPage> {
     );
   }
 
+  Widget _buildAvailableTimeWindow(AvailableTimeWindow window) {
+    return Card(
+      margin: const EdgeInsets.only(bottom: 12),
+      child: ListTile(
+        leading: const Icon(Icons.hourglass_empty_outlined),
+        title: Text(formatAvailableTimeRange(window)),
+        subtitle: Text(formatDurationLabel(window.duration)),
+      ),
+    );
+  }
+
+  Widget _buildAvailableTimeSection() {
+    final availableTimes = _availableTimesForSelectedDate();
+
+    final rangeLabel =
+        '${_twoDigits(_availabilityStartHour)}:00から'
+        '${_twoDigits(_availabilityEndHour)}:00まで';
+
+    return Card(
+      key: const Key('calendar_available_time_section'),
+      child: Padding(
+        padding: const EdgeInsets.all(22),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Row(
+              children: [
+                const Icon(Icons.hourglass_bottom_outlined),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Text(
+                    '空いている時間',
+                    style: Theme.of(context).textTheme.titleLarge?.copyWith(
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 10),
+            Text(
+              '$rangeLabelの予定から算出しています。',
+              style: Theme.of(
+                context,
+              ).textTheme.bodyMedium?.copyWith(height: 1.6),
+            ),
+            const SizedBox(height: 18),
+            if (availableTimes.isEmpty)
+              Padding(
+                padding: const EdgeInsets.symmetric(vertical: 16),
+                child: Column(
+                  children: [
+                    const Icon(Icons.event_note_outlined, size: 48),
+                    const SizedBox(height: 12),
+                    Text(
+                      'この時間帯には空いている時間がありません。',
+                      textAlign: TextAlign.center,
+                      style: Theme.of(context).textTheme.bodyLarge,
+                    ),
+                    const SizedBox(height: 6),
+                    Text(
+                      '予定が続く日もあります。'
+                      '必要だと感じたときは、予定を見直すこともできます。',
+                      textAlign: TextAlign.center,
+                      style: Theme.of(
+                        context,
+                      ).textTheme.bodyMedium?.copyWith(height: 1.6),
+                    ),
+                  ],
+                ),
+              )
+            else ...[
+              ...availableTimes.map(_buildAvailableTimeWindow),
+              const SizedBox(height: 6),
+              Text(
+                '空いている時間は、休息や次の一歩に活用できます。',
+                style: Theme.of(
+                  context,
+                ).textTheme.bodyMedium?.copyWith(height: 1.6),
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -523,8 +645,11 @@ class _CalendarPageState extends State<CalendarPage> {
                     ),
                   ),
                   const SizedBox(height: 20),
-                  if (!_isLoading && _loadError == null)
+                  if (!_isLoading && _loadError == null) ...[
                     _buildSelectedDayEvents(),
+                    const SizedBox(height: 20),
+                    _buildAvailableTimeSection(),
+                  ],
                 ],
               ),
             ),
