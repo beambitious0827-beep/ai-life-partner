@@ -1,6 +1,7 @@
 import 'package:ai_life_partner/features/calendar/domain/models/calendar_event.dart';
 import 'package:ai_life_partner/features/calendar/domain/models/event_category.dart';
 import 'package:ai_life_partner/features/calendar/domain/repositories/calendar_repository.dart';
+import 'package:ai_life_partner/features/calendar/presentation/event_editor_page.dart';
 import 'package:flutter/material.dart';
 
 class CalendarPage extends StatefulWidget {
@@ -148,15 +149,42 @@ class _CalendarPageState extends State<CalendarPage> {
     return '$start - $end';
   }
 
-  void _showEventEditorComingSoon() {
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(
-          '${_selectedDate.month}月${_selectedDate.day}日の予定登録画面は、'
-          '次の工程で追加します',
+  /// 選択している日付を初期値としてEvent Editorを開く。
+  ///
+  /// 保存された場合のみCalendarEventが返るため、
+  /// キャンセルや戻る操作では予定を再取得しない。
+  Future<void> _openEventEditor() async {
+    final savedEvent = await Navigator.of(context).push<CalendarEvent>(
+      MaterialPageRoute<CalendarEvent>(
+        builder: (context) => EventEditorPage(
+          repository: widget.repository,
+          humanId: widget.humanId,
+          initialDate: _selectedDate,
         ),
       ),
     );
+
+    if (!mounted || savedEvent == null) {
+      return;
+    }
+
+    final savedDate = savedEvent.startAt;
+
+    setState(() {
+      _visibleMonth = DateTime(savedDate.year, savedDate.month);
+
+      _selectedDate = DateTime(savedDate.year, savedDate.month, savedDate.day);
+    });
+
+    await _loadMonthEvents();
+
+    if (!mounted) {
+      return;
+    }
+
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(const SnackBar(content: Text('予定を登録しました。')));
   }
 
   Widget _buildMonthHeader() {
@@ -355,7 +383,7 @@ class _CalendarPageState extends State<CalendarPage> {
                   ),
                 ),
                 FilledButton.icon(
-                  onPressed: _showEventEditorComingSoon,
+                  onPressed: _openEventEditor,
                   icon: const Icon(Icons.add),
                   label: const Text('予定を追加'),
                 ),
@@ -420,7 +448,7 @@ class _CalendarPageState extends State<CalendarPage> {
         actions: [
           IconButton(
             tooltip: '予定を追加',
-            onPressed: _showEventEditorComingSoon,
+            onPressed: _openEventEditor,
             icon: const Icon(Icons.add),
           ),
         ],
