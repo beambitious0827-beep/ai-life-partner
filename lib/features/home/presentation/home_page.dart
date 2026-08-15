@@ -4,6 +4,12 @@ import 'package:ai_life_partner/features/calendar/domain/services/available_time
 import 'package:ai_life_partner/features/calendar/presentation/calendar_page.dart';
 import 'package:ai_life_partner/features/calendar/presentation/event_editor_page.dart';
 import 'package:ai_life_partner/features/home/presentation/action_calendar_registration.dart';
+import 'package:ai_life_partner/features/home/presentation/action_journey_record.dart';
+import 'package:ai_life_partner/features/journey/data/in_memory_journey_repository.dart';
+import 'package:ai_life_partner/features/journey/domain/models/journey_entry.dart';
+import 'package:ai_life_partner/features/journey/domain/repositories/journey_repository.dart';
+import 'package:ai_life_partner/features/journey/presentation/journey_page.dart';
+import 'package:ai_life_partner/features/journey/presentation/journey_record_page.dart';
 import 'package:ai_life_partner/features/next_step/presentation/action_calendar_prefill.dart';
 import 'package:ai_life_partner/features/next_step/presentation/calendar_availability.dart';
 import 'package:ai_life_partner/features/next_step/presentation/next_step_page.dart';
@@ -18,6 +24,7 @@ class HomePage extends StatefulWidget {
     required this.supportPreferences,
     this.displayName,
     this.calendarRepository,
+    this.journeyRepository,
   });
 
   final String? displayName;
@@ -29,6 +36,9 @@ class HomePage extends StatefulWidget {
   ///
   /// Persistent Storage Phaseで別の実装へ差し替えられるようにしてある。
   final CalendarRepository? calendarRepository;
+
+  /// 省略した場合は、アプリ内メモリのRepositoryを使用する。
+  final JourneyRepository? journeyRepository;
 
   @override
   State<HomePage> createState() => _HomePageState();
@@ -50,6 +60,9 @@ class _HomePageState extends State<HomePage> {
   late final CalendarRepository _calendarRepository =
       widget.calendarRepository ?? InMemoryCalendarRepository();
 
+  late final JourneyRepository _journeyRepository =
+      widget.journeyRepository ?? InMemoryJourneyRepository();
+
   /// Humanが最後に確定した次の一歩。
   ///
   /// 選んだ時間の情報も保持しておき、将来のCalendar登録フローで利用する。
@@ -68,7 +81,24 @@ class _HomePageState extends State<HomePage> {
   /// あとから考え直せるよう、控えめな操作は残す。
   bool _calendarPromptDeclined = false;
 
+  /// 今日の一歩を歩みとして残した記録。
+  ///
+  /// どの一歩を、どのJourneyEntryとして残したのかを持つ。
+  ActionJourneyRecord? _journeyRecord;
+
   String? get _todayAction => _todayNextStep?.actionText;
+
+  /// いまの一歩を歩みとして残したかどうか。
+  bool get _todayActionRecordedInJourney {
+    final record = _journeyRecord;
+    final nextStep = _todayNextStep;
+
+    if (record == null || nextStep == null) {
+      return false;
+    }
+
+    return record.isFor(nextStep);
+  }
 
   /// いまの一歩がカレンダーへ登録済みかどうか。
   bool get _todayActionAddedToCalendar {
@@ -180,8 +210,65 @@ class _HomePageState extends State<HomePage> {
         // 別の一歩なので、前の一歩の登録記録は引き継がない。
         _calendarRegistration = null;
         _calendarPromptDeclined = false;
+
+        // 歩みの記録も同じで、新しい一歩は未記録から始まる。
+        _journeyRecord = null;
       }
     });
+  }
+
+  /// 今日の一歩について、その後どうだったかをHumanが残す。
+  ///
+  /// ここではJourneyEntryを作らない。
+  /// 記録画面でHumanが「歩みとして残す」を押したときだけ保存される。
+  Future<void> _openJourneyRecord() async {
+    final nextStep = _todayNextStep;
+
+    if (nextStep == null || _todayActionRecordedInJourney) {
+      return;
+    }
+
+    // カレンダーへ登録している一歩なら、その予定IDを写しとして持たせる。
+    // Journey自体はCalendar Eventに依存しない。
+    final sourceCalendarEventId = _todayActionAddedToCalendar
+        ? _calendarRegistration?.calendarEventId
+        : null;
+
+    final entry = await Navigator.of(context).push<JourneyEntry>(
+      MaterialPageRoute<JourneyEntry>(
+        builder: (context) => JourneyRecordPage(
+          repository: _journeyRepository,
+          humanId: _humanId,
+          plannedActionText: nextStep.actionText,
+          plannedDuration: nextStep.actionDuration,
+          sourceCalendarEventId: sourceCalendarEventId,
+        ),
+      ),
+    );
+
+    if (!mounted || entry == null) {
+      return;
+    }
+
+    setState(() {
+      _journeyRecord = ActionJourneyRecord(
+        action: nextStep,
+        journeyEntryId: entry.id,
+      );
+    });
+
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(const SnackBar(content: Text('歩みに残しました。')));
+  }
+
+  Future<void> _openJourney() async {
+    await Navigator.of(context).push<void>(
+      MaterialPageRoute<void>(
+        builder: (context) =>
+            JourneyPage(repository: _journeyRepository, humanId: _humanId),
+      ),
+    );
   }
 
   /// 今日の一歩をカレンダーへ追加するかどうかを、Humanが確認する。
@@ -455,6 +542,56 @@ class _HomePageState extends State<HomePage> {
   ///
   /// Actionを決めたことと、カレンダーへ登録することは別の判断なので、
   /// 追加するかどうかはHumanがここで選ぶ。
+  /// 今日の一歩を歩みとして残すかどうかの、控えめな案内。
+  ///
+  /// Actionを決めたことと、歩みとして残すことは別の判断なので、
+  /// 残すかどうかはHumanがここで選ぶ。
+  Widget _buildJourneyPrompt(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
+
+    if (_todayActionRecordedInJourney) {
+      return Row(
+        key: const Key('home_action_journey_recorded'),
+        children: [
+          Icon(Icons.route_outlined, size: 20, color: colorScheme.primary),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Text(
+              'この一歩は歩みに残しました。',
+              style: Theme.of(context).textTheme.bodyMedium,
+            ),
+          ),
+        ],
+      );
+    }
+
+    return Column(
+      key: const Key('home_action_journey_prompt'),
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Text(
+          'その後どうだったかを、歩みとして残せます。',
+          style: Theme.of(context).textTheme.bodyMedium?.copyWith(height: 1.6),
+        ),
+        const SizedBox(height: 4),
+        Text(
+          '取り組んだ日も、別のことを選んだ日も、休んだ日も残せます。',
+          style: Theme.of(context).textTheme.bodySmall?.copyWith(height: 1.5),
+        ),
+        const SizedBox(height: 12),
+        Align(
+          alignment: Alignment.centerLeft,
+          child: OutlinedButton.icon(
+            key: const Key('home_record_journey_button'),
+            onPressed: _openJourneyRecord,
+            icon: const Icon(Icons.route_outlined),
+            label: const Text('歩みとして残す'),
+          ),
+        ),
+      ],
+    );
+  }
+
   Widget _buildCalendarPrompt(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
 
@@ -579,17 +716,10 @@ class _HomePageState extends State<HomePage> {
               ),
             ),
             if (hasAction) ...[
-              const SizedBox(height: 10),
-              OutlinedButton.icon(
-                onPressed: () {
-                  _showComingSoon(
-                    context,
-                    '次の工程で、完了したActionをJourneyへ残せるようにします',
-                  );
-                },
-                icon: const Icon(Icons.check),
-                label: const Text('できたと記録する'),
-              ),
+              const SizedBox(height: 20),
+              const Divider(height: 1),
+              const SizedBox(height: 16),
+              _buildJourneyPrompt(context),
               const SizedBox(height: 20),
               const Divider(height: 1),
               const SizedBox(height: 16),
@@ -683,10 +813,10 @@ class _HomePageState extends State<HomePage> {
                       _buildQuickAction(
                         context: context,
                         icon: Icons.route_outlined,
-                        title: '歩みを残す',
-                        description: '今日行ったことや感じたことを記録します。',
+                        title: '歩み',
+                        description: 'これまで歩いてきた道のりを見返します。',
                         onTap: () {
-                          _showComingSoon(context, 'Journey機能は今後追加します');
+                          _openJourney();
                         },
                       ),
                       _buildQuickAction(

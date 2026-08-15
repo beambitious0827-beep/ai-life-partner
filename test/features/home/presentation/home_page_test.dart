@@ -9,6 +9,12 @@ import 'package:ai_life_partner/features/calendar/domain/repositories/calendar_r
 import 'package:ai_life_partner/features/calendar/presentation/calendar_page.dart';
 import 'package:ai_life_partner/features/calendar/presentation/event_editor_page.dart';
 import 'package:ai_life_partner/features/home/presentation/home_page.dart';
+import 'package:ai_life_partner/features/journey/data/in_memory_journey_repository.dart';
+import 'package:ai_life_partner/features/journey/domain/models/journey_entry.dart';
+import 'package:ai_life_partner/features/journey/domain/models/journey_outcome.dart';
+import 'package:ai_life_partner/features/journey/domain/repositories/journey_repository.dart';
+import 'package:ai_life_partner/features/journey/presentation/journey_page.dart';
+import 'package:ai_life_partner/features/journey/presentation/journey_record_page.dart';
 import 'package:ai_life_partner/features/next_step/presentation/next_step_page.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -81,6 +87,7 @@ CalendarEvent createEvent({
 Future<void> pumpHome(
   WidgetTester tester, {
   required CalendarRepository repository,
+  JourneyRepository? journeyRepository,
 }) async {
   tester.view.physicalSize = const Size(1400, 5000);
   tester.view.devicePixelRatio = 1.0;
@@ -95,6 +102,7 @@ Future<void> pumpHome(
         goals: const <String, String>{},
         supportPreferences: const <String>[],
         calendarRepository: repository,
+        journeyRepository: journeyRepository,
       ),
     ),
   );
@@ -110,6 +118,13 @@ const Key declineCalendarKey = Key('home_decline_action_calendar_button');
 const Key calendarPromptKey = Key('home_action_calendar_prompt');
 const Key calendarRegisteredKey = Key('home_action_calendar_registered');
 const Key calendarDeferredKey = Key('home_action_calendar_deferred');
+
+const Key recordJourneyKey = Key('home_record_journey_button');
+const Key journeyPromptKey = Key('home_action_journey_prompt');
+const Key journeyRecordedKey = Key('home_action_journey_recorded');
+
+const Key journeySaveButtonKey = Key('journey_record_save_button');
+const Key journeyCancelButtonKey = Key('journey_record_cancel_button');
 
 const Key editorTitleFieldKey = Key('event_editor_title_field');
 const Key editorSaveButtonKey = Key('event_editor_save_button');
@@ -177,6 +192,47 @@ Future<List<CalendarEvent>> readTodayEvents(
     rangeStart: DateTime(now.year, now.month, now.day),
     rangeEnd: DateTime(now.year, now.month, now.day + 1),
   );
+}
+
+/// その日に残っている歩みをすべて読み出す。
+Future<List<JourneyEntry>> readJourneyEntries(
+  JourneyRepository repository,
+) async {
+  final now = DateTime.now();
+
+  return repository.getEntries(
+    humanId: humanId,
+    rangeStart: DateTime(now.year, now.month, now.day),
+    rangeEnd: DateTime(now.year, now.month, now.day + 1),
+  );
+}
+
+/// Homeから記録画面を開き、結果を選んで歩みとして残す。
+Future<void> recordJourney(
+  WidgetTester tester,
+  JourneyOutcome outcome, {
+  String? note,
+}) async {
+  await tapByKey(tester, recordJourneyKey);
+
+  expect(find.byType(JourneyRecordPage), findsOneWidget);
+
+  await tapByKey(tester, Key('journey_record_outcome_${outcome.name}'));
+
+  if (note != null) {
+    await tester.enterText(
+      find.byKey(const Key('journey_record_note_field')),
+      note,
+    );
+
+    await tester.pumpAndSettle();
+  }
+
+  await tapByKey(tester, journeySaveButtonKey);
+
+  await settleSnackBar(tester);
+
+  expect(find.byType(JourneyRecordPage), findsNothing);
 }
 
 /// NextStepPageの候補確定までを通しで行い、Homeへ戻る。
@@ -1227,6 +1283,305 @@ void main() {
       expect(find.byKey(calendarPromptKey), findsNothing);
 
       expect(await readTodayEvents(repository), hasLength(1));
+    });
+  });
+
+  group('今日の一歩を歩みとして残す', () {
+    testWidgets('Actionを確定しただけでは歩みを記録しない', (tester) async {
+      final journeyRepository = InMemoryJourneyRepository();
+
+      await pumpHome(
+        tester,
+        repository: InMemoryCalendarRepository(),
+        journeyRepository: journeyRepository,
+      );
+
+      await confirmManualNextStep(tester);
+
+      expect(find.text(manualActionText), findsOneWidget);
+
+      // 決めただけでは残さない。残すかどうかはHumanが決める。
+      expect(await readJourneyEntries(journeyRepository), isEmpty);
+
+      expect(find.byKey(journeyPromptKey), findsOneWidget);
+      expect(find.byKey(recordJourneyKey), findsOneWidget);
+      expect(find.byKey(journeyRecordedKey), findsNothing);
+    });
+
+    testWidgets('「歩みとして残す」で記録画面が開き、まだ保存されない', (tester) async {
+      final journeyRepository = InMemoryJourneyRepository();
+
+      await pumpHome(
+        tester,
+        repository: InMemoryCalendarRepository(),
+        journeyRepository: journeyRepository,
+      );
+
+      await confirmManualNextStep(tester);
+
+      await tapByKey(tester, recordJourneyKey);
+
+      expect(find.byType(JourneyRecordPage), findsOneWidget);
+      expect(find.text('その後、どうでしたか？'), findsOneWidget);
+
+      // もとになった一歩が引き継がれている。
+      expect(find.text(manualActionText), findsWidgets);
+
+      // 開いただけでは保存しない。
+      expect(await readJourneyEntries(journeyRepository), isEmpty);
+    });
+
+    testWidgets('記録画面で保存したときだけ歩みが残る', (tester) async {
+      final journeyRepository = InMemoryJourneyRepository();
+
+      await pumpHome(
+        tester,
+        repository: InMemoryCalendarRepository(),
+        journeyRepository: journeyRepository,
+      );
+
+      await confirmManualNextStep(tester);
+
+      await tapByKey(tester, recordJourneyKey);
+
+      await tapByKey(
+        tester,
+        Key('journey_record_outcome_${JourneyOutcome.rested.name}'),
+      );
+
+      expect(await readJourneyEntries(journeyRepository), isEmpty);
+
+      await tapByKey(tester, journeySaveButtonKey);
+
+      await settleSnackBar(tester);
+
+      expect(find.byType(JourneyRecordPage), findsNothing);
+      expect(find.byType(HomePage), findsOneWidget);
+
+      final entries = await readJourneyEntries(journeyRepository);
+
+      expect(entries, hasLength(1));
+
+      final entry = entries.single;
+
+      expect(entry.plannedActionText, manualActionText);
+      expect(entry.humanId, humanId);
+      expect(entry.outcome, JourneyOutcome.rested);
+      expect(entry.plannedDuration, const Duration(minutes: 30));
+    });
+
+    testWidgets('記録画面をキャンセルすると歩みを残さない', (tester) async {
+      final journeyRepository = InMemoryJourneyRepository();
+
+      await pumpHome(
+        tester,
+        repository: InMemoryCalendarRepository(),
+        journeyRepository: journeyRepository,
+      );
+
+      await confirmManualNextStep(tester);
+
+      await tapByKey(tester, recordJourneyKey);
+
+      await tapByKey(
+        tester,
+        Key('journey_record_outcome_${JourneyOutcome.completed.name}'),
+      );
+
+      await tapByKey(tester, journeyCancelButtonKey);
+
+      expect(find.byType(JourneyRecordPage), findsNothing);
+      expect(await readJourneyEntries(journeyRepository), isEmpty);
+
+      // 今日の一歩は残り、記録操作も引き続き使える。
+      expect(find.text(manualActionText), findsOneWidget);
+      expect(find.byKey(recordJourneyKey), findsOneWidget);
+      expect(find.byKey(journeyRecordedKey), findsNothing);
+    });
+
+    testWidgets('保存後は同じ一歩の「歩みとして残す」を出さない', (tester) async {
+      final journeyRepository = InMemoryJourneyRepository();
+
+      await pumpHome(
+        tester,
+        repository: InMemoryCalendarRepository(),
+        journeyRepository: journeyRepository,
+      );
+
+      await confirmManualNextStep(tester);
+
+      await recordJourney(tester, JourneyOutcome.completed);
+
+      expect(find.byKey(recordJourneyKey), findsNothing);
+      expect(find.byKey(journeyPromptKey), findsNothing);
+      expect(find.byKey(journeyRecordedKey), findsOneWidget);
+      expect(find.text('この一歩は歩みに残しました。'), findsOneWidget);
+
+      expect(await readJourneyEntries(journeyRepository), hasLength(1));
+    });
+
+    testWidgets('実質的に同じ一歩を決め直しても、記録済みのまま', (tester) async {
+      final journeyRepository = InMemoryJourneyRepository();
+
+      await pumpHome(
+        tester,
+        repository: InMemoryCalendarRepository(),
+        journeyRepository: journeyRepository,
+      );
+
+      await confirmManualNextStep(tester);
+
+      await recordJourney(tester, JourneyOutcome.completed);
+
+      await reviseNextStep(tester);
+
+      await tapByKey(
+        tester,
+        Key('next_step_manual_time_${AvailableTime.thirtyMinutes.name}'),
+      );
+
+      await confirmNextStep(tester, 'いつもどおり');
+
+      // 同じ記録対象なので、二重に残しやすい状態へ戻さない。
+      expect(find.byKey(journeyRecordedKey), findsOneWidget);
+      expect(find.byKey(recordJourneyKey), findsNothing);
+
+      expect(await readJourneyEntries(journeyRepository), hasLength(1));
+    });
+
+    testWidgets('異なる一歩を確定した場合は、また記録できる', (tester) async {
+      final journeyRepository = InMemoryJourneyRepository();
+
+      await pumpHome(
+        tester,
+        repository: InMemoryCalendarRepository(),
+        journeyRepository: journeyRepository,
+      );
+
+      await confirmManualNextStep(tester);
+
+      await recordJourney(tester, JourneyOutcome.completed);
+
+      await reviseNextStep(tester);
+
+      await tapByKey(
+        tester,
+        Key('next_step_manual_time_${AvailableTime.tenMinutes.name}'),
+      );
+
+      await confirmNextStep(tester, 'いつもどおり');
+
+      expect(find.byKey(journeyRecordedKey), findsNothing);
+      expect(find.byKey(recordJourneyKey), findsOneWidget);
+
+      // 新しい一歩を残すまで、歩みは増えない。
+      expect(await readJourneyEntries(journeyRepository), hasLength(1));
+    });
+
+    testWidgets('カレンダーへ登録済みの一歩は、予定IDを写しとして残す', (tester) async {
+      final calendarRepository = InMemoryCalendarRepository();
+      final journeyRepository = InMemoryJourneyRepository();
+
+      await pumpHome(
+        tester,
+        repository: calendarRepository,
+        journeyRepository: journeyRepository,
+      );
+
+      await confirmManualNextStep(tester);
+
+      await tapByKey(tester, addToCalendarKey);
+      await tapByKey(tester, editorSaveButtonKey);
+
+      await settleSnackBar(tester);
+
+      final savedEvent = (await readTodayEvents(calendarRepository)).single;
+
+      await recordJourney(tester, JourneyOutcome.completed);
+
+      final entry = (await readJourneyEntries(journeyRepository)).single;
+
+      expect(entry.sourceCalendarEventId, savedEvent.id);
+    });
+
+    testWidgets('カレンダー未登録の一歩では、予定IDを持たない', (tester) async {
+      final journeyRepository = InMemoryJourneyRepository();
+
+      await pumpHome(
+        tester,
+        repository: InMemoryCalendarRepository(),
+        journeyRepository: journeyRepository,
+      );
+
+      await confirmManualNextStep(tester);
+
+      await recordJourney(tester, JourneyOutcome.completed);
+
+      final entry = (await readJourneyEntries(journeyRepository)).single;
+
+      expect(entry.sourceCalendarEventId, isNull);
+    });
+
+    testWidgets('歩みは予定が削除されても残る', (tester) async {
+      final calendarRepository = InMemoryCalendarRepository();
+      final journeyRepository = InMemoryJourneyRepository();
+
+      await pumpHome(
+        tester,
+        repository: calendarRepository,
+        journeyRepository: journeyRepository,
+      );
+
+      await confirmManualNextStep(tester);
+
+      await tapByKey(tester, addToCalendarKey);
+      await tapByKey(tester, editorSaveButtonKey);
+
+      await settleSnackBar(tester);
+
+      final savedEvent = (await readTodayEvents(calendarRepository)).single;
+
+      await recordJourney(tester, JourneyOutcome.partial);
+
+      expect(await readJourneyEntries(journeyRepository), hasLength(1));
+
+      // カレンダー側で予定を削除する。
+      await openCalendarFromHome(tester);
+      await deleteEventOnCalendar(tester, savedEvent.id);
+      await backToHome(tester);
+
+      expect(await readTodayEvents(calendarRepository), isEmpty);
+
+      // 歩みは独立した履歴なので、そのまま残る。
+      final entries = await readJourneyEntries(journeyRepository);
+
+      expect(entries, hasLength(1));
+      expect(entries.single.sourceCalendarEventId, savedEvent.id);
+      expect(find.byKey(journeyRecordedKey), findsOneWidget);
+    });
+
+    testWidgets('Homeから歩みの一覧を開ける', (tester) async {
+      final journeyRepository = InMemoryJourneyRepository();
+
+      await pumpHome(
+        tester,
+        repository: InMemoryCalendarRepository(),
+        journeyRepository: journeyRepository,
+      );
+
+      await confirmManualNextStep(tester);
+
+      await recordJourney(tester, JourneyOutcome.partial);
+
+      await tapByText(tester, '歩み');
+
+      expect(find.byType(JourneyPage), findsOneWidget);
+      expect(find.text('これまでの歩み'), findsOneWidget);
+
+      // 残した歩みが履歴として読める。
+      // Homeも背後に残るため、一歩の文言は複数見つかる。
+      expect(find.text(manualActionText), findsWidgets);
+      expect(find.text('少し取り組んだ'), findsOneWidget);
     });
   });
 }
