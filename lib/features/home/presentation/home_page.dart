@@ -1,7 +1,10 @@
 import 'package:ai_life_partner/features/calendar/data/in_memory_calendar_repository.dart';
 import 'package:ai_life_partner/features/calendar/domain/repositories/calendar_repository.dart';
+import 'package:ai_life_partner/features/calendar/domain/services/available_time_calculator.dart';
 import 'package:ai_life_partner/features/calendar/presentation/calendar_page.dart';
+import 'package:ai_life_partner/features/next_step/presentation/calendar_availability.dart';
 import 'package:ai_life_partner/features/next_step/presentation/next_step_page.dart';
+import 'package:ai_life_partner/features/next_step/presentation/next_step_result.dart';
 import 'package:flutter/material.dart';
 
 class HomePage extends StatefulWidget {
@@ -11,12 +14,18 @@ class HomePage extends StatefulWidget {
     required this.goals,
     required this.supportPreferences,
     this.displayName,
+    this.calendarRepository,
   });
 
   final String? displayName;
   final List<String> selectedAreas;
   final Map<String, String> goals;
   final List<String> supportPreferences;
+
+  /// 省略した場合は、アプリ内メモリのRepositoryを使用する。
+  ///
+  /// Persistent Storage Phaseで別の実装へ差し替えられるようにしてある。
+  final CalendarRepository? calendarRepository;
 
   @override
   State<HomePage> createState() => _HomePageState();
@@ -25,9 +34,26 @@ class HomePage extends StatefulWidget {
 class _HomePageState extends State<HomePage> {
   static const String _humanId = 'local-human';
 
-  final CalendarRepository _calendarRepository = InMemoryCalendarRepository();
+  /// Calendar Available Time UIと同じv1のルール。
+  ///
+  /// 将来は起床時間や生活パターンから決められるよう、
+  /// AvailableTimeCalculatorへは固定せず呼び出し側で範囲を組み立てる。
+  static const int _availabilityStartHour = 6;
+  static const int _availabilityEndHour = 23;
 
-  String? _todayAction;
+  static const AvailableTimeCalculator _availableTimeCalculator =
+      AvailableTimeCalculator();
+
+  late final CalendarRepository _calendarRepository =
+      widget.calendarRepository ?? InMemoryCalendarRepository();
+
+  /// Humanが最後に確定した次の一歩。
+  ///
+  /// 選んだ時間の情報も保持しておき、将来のCalendar登録フローで利用する。
+  /// 現時点ではCalendar Eventを作成しない。
+  NextStepResult? _todayNextStep;
+
+  String? get _todayAction => _todayNextStep?.actionText;
 
   String get _name {
     final name = widget.displayName?.trim();
@@ -45,23 +71,79 @@ class _HomePageState extends State<HomePage> {
     ).showSnackBar(SnackBar(content: Text(message)));
   }
 
+  /// 今日の予定から空き時間を算出する。
+  ///
+  ///     CalendarRepository → CalendarEvent
+  ///         → AvailableTimeCalculator → AvailableTimeWindow
+  ///
+  /// NextStepPageへはAvailableTimeWindowだけを渡し、
+  /// CalendarEventの内容は持ち出さない。
+  Future<CalendarAvailability> _loadTodayAvailability() async {
+    final now = DateTime.now();
+
+    final rangeStart = DateTime(
+      now.year,
+      now.month,
+      now.day,
+      _availabilityStartHour,
+    );
+
+    final rangeEnd = DateTime(
+      now.year,
+      now.month,
+      now.day,
+      _availabilityEndHour,
+    );
+
+    try {
+      final events = await _calendarRepository.getEvents(
+        humanId: _humanId,
+        rangeStart: rangeStart,
+        rangeEnd: rangeEnd,
+      );
+
+      return CalendarAvailability.loaded(
+        _availableTimeCalculator.calculate(
+          rangeStart: rangeStart,
+          rangeEnd: rangeEnd,
+          events: events,
+        ),
+      );
+    } on Object catch (error) {
+      // 失敗を空の結果にすり替えると、
+      // 「予定で埋まっている」と「確認できなかった」が区別できなくなる。
+      // 失敗はfailedとしてHumanへ伝え、診断は予定の中身を含めずに残す。
+      debugPrint('今日の空き時間を確認できませんでした: ${error.runtimeType}');
+
+      return const CalendarAvailability.failed();
+    }
+  }
+
   Future<void> _openNextStep() async {
-    final action = await Navigator.of(context).push<String>(
-      MaterialPageRoute<String>(
+    final availability = await _loadTodayAvailability();
+
+    if (!mounted) {
+      return;
+    }
+
+    final result = await Navigator.of(context).push<NextStepResult>(
+      MaterialPageRoute<NextStepResult>(
         builder: (context) => NextStepPage(
           displayName: widget.displayName,
           selectedAreas: widget.selectedAreas,
           goals: widget.goals,
+          availability: availability,
+          onReloadAvailability: _loadTodayAvailability,
         ),
       ),
     );
 
-    if (!mounted || action == null || action.trim().isEmpty) {
+    if (!mounted || result == null || result.actionText.trim().isEmpty) {
       return;
     }
 
     setState(() {
-      _todayAction = action.trim();
+      _todayNextStep = result;
     });
   }
 
