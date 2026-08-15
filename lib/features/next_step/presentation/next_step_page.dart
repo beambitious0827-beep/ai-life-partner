@@ -510,10 +510,19 @@ class _NextStepPageState extends State<NextStepPage> {
     }
 
     final window = _selectedWindow;
+    final energy = _selectedEnergy;
 
     // 時間の情報も一緒に返す。Calendar Eventはここでは作らない。
-    final result = window != null
-        ? NextStepResult.fromCalendarWindow(actionText: action, window: window)
+    //
+    // 空き時間を選んでいる場合は、その時間帯と、
+    // 候補づくりで実際に使ったActionの長さの両方を返す。
+    // 空き時間の長さそのものはActionの長さではない。
+    final result = (window != null && energy != null)
+        ? NextStepResult.fromCalendarWindow(
+            actionText: action,
+            window: window,
+            duration: _suggestedActionDuration(window: window, energy: energy),
+          )
         : NextStepResult.fromManualTime(
             actionText: action,
             duration: _selectedTime?.manualDuration,

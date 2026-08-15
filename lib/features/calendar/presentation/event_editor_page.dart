@@ -3,6 +3,7 @@ import 'package:ai_life_partner/features/calendar/domain/models/calendar_event.d
 import 'package:ai_life_partner/features/calendar/domain/models/calendar_source.dart';
 import 'package:ai_life_partner/features/calendar/domain/models/event_category.dart';
 import 'package:ai_life_partner/features/calendar/domain/repositories/calendar_repository.dart';
+import 'package:ai_life_partner/features/calendar/presentation/event_editor_prefill.dart';
 import 'package:ai_life_partner/features/calendar/presentation/event_schedule_input.dart';
 import 'package:flutter/material.dart';
 
@@ -44,7 +45,14 @@ class EventEditorPage extends StatefulWidget {
     required this.humanId,
     required this.initialDate,
     this.initialEvent,
+    this.initialPrefill,
   });
+
+  /// 新規登録モードの既定の開始時刻。
+  static const TimeOfDay defaultStartTime = TimeOfDay(hour: 9, minute: 0);
+
+  /// 新規登録モードの既定の終了時刻。
+  static const TimeOfDay defaultEndTime = TimeOfDay(hour: 10, minute: 0);
 
   final CalendarRepository repository;
 
@@ -56,6 +64,12 @@ class EventEditorPage extends StatefulWidget {
 
   /// 編集する既存の予定。nullの場合は新規登録モードになる。
   final CalendarEvent? initialEvent;
+
+  /// 新規登録モードで、外から渡された初期値の候補。
+  ///
+  /// 「次の一歩」をカレンダーへ追加する場合などに使う。
+  /// [initialEvent] がある場合（編集モード）は使用しない。
+  final EventEditorPrefill? initialPrefill;
 
   @override
   State<EventEditorPage> createState() => _EventEditorPageState();
@@ -74,8 +88,8 @@ class _EventEditorPageState extends State<EventEditorPage> {
 
   bool _isAllDay = false;
 
-  TimeOfDay _startTime = const TimeOfDay(hour: 9, minute: 0);
-  TimeOfDay _endTime = const TimeOfDay(hour: 10, minute: 0);
+  TimeOfDay _startTime = EventEditorPage.defaultStartTime;
+  TimeOfDay _endTime = EventEditorPage.defaultEndTime;
 
   EventCategory _category = EventCategory.other;
 
@@ -104,6 +118,8 @@ class _EventEditorPageState extends State<EventEditorPage> {
         widget.initialDate.day,
       );
 
+      _applyPrefill();
+
       return;
     }
 
@@ -129,6 +145,34 @@ class _EventEditorPageState extends State<EventEditorPage> {
 
     _category = initialEvent.category;
     _aiVisibility = initialEvent.aiVisibility;
+  }
+
+  /// 新規登録モードで、外から渡された初期値の候補を反映する。
+  ///
+  /// 反映するのはあくまで候補で、Humanはすべて変更できる。
+  /// 開始・終了の候補が無い場合は、既定の時刻をそのまま使う。
+  void _applyPrefill() {
+    final prefill = widget.initialPrefill;
+
+    if (prefill == null) {
+      return;
+    }
+
+    _titleController.text = prefill.title;
+    _category = prefill.category;
+    _aiVisibility = prefill.aiVisibility;
+
+    if (!prefill.hasSchedule) {
+      return;
+    }
+
+    final startAt = prefill.startAt!;
+    final endAt = prefill.endAt!;
+
+    _date = DateTime(startAt.year, startAt.month, startAt.day);
+
+    _startTime = TimeOfDay.fromDateTime(startAt);
+    _endTime = TimeOfDay.fromDateTime(endAt);
   }
 
   @override
@@ -637,8 +681,15 @@ class _EventEditorPageState extends State<EventEditorPage> {
               child: FilledButton.icon(
                 key: const Key('event_editor_save_button'),
                 onPressed: _isSaving ? null : _save,
-                icon: const Icon(Icons.check),
-                label: const Text('この予定を保存する'),
+                // 保存中は、進行中であることが分かる表示にする。
+                icon: _isSaving
+                    ? const SizedBox(
+                        width: 18,
+                        height: 18,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
+                    : const Icon(Icons.check),
+                label: Text(_isSaving ? '保存しています…' : 'この予定を保存する'),
               ),
             ),
           ],
@@ -662,6 +713,15 @@ class _EventEditorPageState extends State<EventEditorPage> {
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
 
+    // 保存中に画面を離れると、保存結果と呼び出し元の状態がずれてしまう。
+    // 保存が終わるまでは、戻る操作でこの画面を閉じられないようにする。
+    return PopScope(
+      canPop: !_isSaving,
+      child: _buildScaffold(context, colorScheme),
+    );
+  }
+
+  Widget _buildScaffold(BuildContext context, ColorScheme colorScheme) {
     return Scaffold(
       appBar: AppBar(title: Text(_isEditing ? '予定を編集' : '予定を登録')),
       body: SafeArea(

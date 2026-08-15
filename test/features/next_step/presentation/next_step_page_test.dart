@@ -528,7 +528,33 @@ void main() {
       expect(result.selectedCalendarWindow?.endAt, selectedWindow.endAt);
       expect(result.selectedCalendarWindow?.duration, const Duration(hours: 3));
 
-      expect(result.manualDuration, isNull);
+      // 空き時間の長さ（3時間）ではなく、提案したActionの長さが残る。
+      // generateSuggestionsは「いつもどおり」を選ぶので30分。
+      expect(result.actionDuration, const Duration(minutes: 30));
+    });
+
+    testWidgets('空き時間が提案の目安より短い場合は、空き時間の長さが残る', (tester) async {
+      final selectedWindow = window(18, 0, 18, 20);
+
+      final holder = await pumpNextStepWithHost(
+        tester,
+        availableTimeWindows: <AvailableTimeWindow>[selectedWindow],
+      );
+
+      await tapByKey(tester, windowKey(0));
+
+      await tapByText(tester, '余力がある');
+      await tapByText(tester, '今の状況から候補を考える');
+
+      await confirmFirstSuggestion(tester);
+
+      final result = holder.value;
+
+      expect(result, isNotNull);
+      expect(result!.selectedCalendarWindow, selectedWindow);
+
+      // 余力の目安は1時間だが、空き時間の20分を超えない。
+      expect(result.actionDuration, const Duration(minutes: 20));
     });
 
     testWidgets('手動時間を選んで確定すると、結果に長さが残る', (tester) async {
@@ -548,7 +574,7 @@ void main() {
       expect(result, isNotNull);
       expect(result!.usesCalendarWindow, isFalse);
       expect(result.selectedCalendarWindow, isNull);
-      expect(result.manualDuration, const Duration(minutes: 30));
+      expect(result.actionDuration, const Duration(minutes: 30));
     });
 
     testWidgets('「時間は調整できる」を選んだ場合は特定の長さを持たない', (tester) async {
@@ -564,7 +590,9 @@ void main() {
 
       expect(result, isNotNull);
       expect(result!.selectedCalendarWindow, isNull);
-      expect(result.manualDuration, isNull);
+
+      // 存在しない長さを勝手に決めない。
+      expect(result.actionDuration, isNull);
       expect(result.actionText.isNotEmpty, isTrue);
     });
   });

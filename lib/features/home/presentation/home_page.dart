@@ -2,6 +2,9 @@ import 'package:ai_life_partner/features/calendar/data/in_memory_calendar_reposi
 import 'package:ai_life_partner/features/calendar/domain/repositories/calendar_repository.dart';
 import 'package:ai_life_partner/features/calendar/domain/services/available_time_calculator.dart';
 import 'package:ai_life_partner/features/calendar/presentation/calendar_page.dart';
+import 'package:ai_life_partner/features/calendar/presentation/event_editor_page.dart';
+import 'package:ai_life_partner/features/home/presentation/action_calendar_registration.dart';
+import 'package:ai_life_partner/features/next_step/presentation/action_calendar_prefill.dart';
 import 'package:ai_life_partner/features/next_step/presentation/calendar_availability.dart';
 import 'package:ai_life_partner/features/next_step/presentation/next_step_page.dart';
 import 'package:ai_life_partner/features/next_step/presentation/next_step_result.dart';
@@ -53,7 +56,31 @@ class _HomePageState extends State<HomePage> {
   /// 現時点ではCalendar Eventを作成しない。
   NextStepResult? _todayNextStep;
 
+  /// 今日の一歩をカレンダーへ登録した記録。
+  ///
+  /// どの一歩を、どのCalendar Eventとして保存したのかを持つ。
+  /// Calendar側で削除された場合は、この記録を解除する。
+  ActionCalendarRegistration? _calendarRegistration;
+
+  /// 「今は追加しない」を選んだかどうか。
+  ///
+  /// 強い問いかけを閉じるだけで、追加そのものを諦めた印ではない。
+  /// あとから考え直せるよう、控えめな操作は残す。
+  bool _calendarPromptDeclined = false;
+
   String? get _todayAction => _todayNextStep?.actionText;
+
+  /// いまの一歩がカレンダーへ登録済みかどうか。
+  bool get _todayActionAddedToCalendar {
+    final registration = _calendarRegistration;
+    final nextStep = _todayNextStep;
+
+    if (registration == null || nextStep == null) {
+      return false;
+    }
+
+    return registration.isFor(nextStep);
+  }
 
   String get _name {
     final name = widget.displayName?.trim();
@@ -142,9 +169,127 @@ class _HomePageState extends State<HomePage> {
       return;
     }
 
+    // 実質的に同じ一歩を決め直しただけなら、登録済みの状態は保つ。
+    // 同じCalendar Eventを二重に作りやすい状態へ戻さないため。
+    final isSameAction = _todayNextStep == result;
+
     setState(() {
       _todayNextStep = result;
+
+      if (!isSameAction) {
+        // 別の一歩なので、前の一歩の登録記録は引き継がない。
+        _calendarRegistration = null;
+        _calendarPromptDeclined = false;
+      }
     });
+  }
+
+  /// 今日の一歩をカレンダーへ追加するかどうかを、Humanが確認する。
+  ///
+  /// ここではCalendar Eventを作らない。
+  /// Event Editorを開き、内容と日時をHumanが確認して保存したときだけ、
+  /// CalendarRepository.saveEvent()が実行される。
+  Future<void> _addTodayActionToCalendar() async {
+    final nextStep = _todayNextStep;
+
+    if (nextStep == null || _todayActionAddedToCalendar) {
+      return;
+    }
+
+    final now = DateTime.now();
+
+    // 時刻の情報がないActionのために、
+    // Event Editorの新規作成時と同じ既定の開始時刻を基準にする。
+    final defaultStartAt = DateTime(
+      now.year,
+      now.month,
+      now.day,
+      EventEditorPage.defaultStartTime.hour,
+      EventEditorPage.defaultStartTime.minute,
+    );
+
+    final prefill = buildActionCalendarPrefill(
+      result: nextStep,
+      defaultStartAt: defaultStartAt,
+    );
+
+    final result = await Navigator.of(context).push<EventEditorResult>(
+      MaterialPageRoute<EventEditorResult>(
+        builder: (context) => EventEditorPage(
+          repository: _calendarRepository,
+          humanId: _humanId,
+          initialDate: defaultStartAt,
+          initialPrefill: prefill,
+        ),
+      ),
+    );
+
+    if (!mounted || result == null || !result.isSaved) {
+      return;
+    }
+
+    setState(() {
+      // 保存されたCalendar EventのIDを、対象の一歩と対にして持つ。
+      _calendarRegistration = ActionCalendarRegistration(
+        action: nextStep,
+        calendarEventId: result.event.id,
+      );
+
+      _calendarPromptDeclined = false;
+    });
+
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(const SnackBar(content: Text('カレンダーに追加しました。')));
+  }
+
+  void _declineCalendarPrompt() {
+    setState(() {
+      _calendarPromptDeclined = true;
+    });
+  }
+
+  /// 登録済みのCalendar Eventが、まだ存在するかを確認する。
+  ///
+  /// Calendar側で削除されていれば登録記録を解除し、
+  /// 同じ一歩をもう一度追加できるようにする。
+  ///
+  /// 取得に失敗しただけの場合は「削除された」と判断しない。
+  Future<void> _reconcileCalendarRegistration() async {
+    final registration = _calendarRegistration;
+
+    if (registration == null) {
+      return;
+    }
+
+    try {
+      final event = await _calendarRepository.getEventById(
+        registration.calendarEventId,
+      );
+
+      if (!mounted) {
+        return;
+      }
+
+      // 待っている間に、別の一歩が登録されていることがある。
+      // その場合この結果は古いので、新しい登録には触れない。
+      final current = _calendarRegistration;
+
+      if (current == null || !current.isSameRegistrationAs(registration)) {
+        return;
+      }
+
+      if (event != null) {
+        return;
+      }
+
+      setState(() {
+        _calendarRegistration = null;
+      });
+    } on Object catch (error) {
+      // 確認できなかっただけなので、登録記録はそのまま残す。
+      debugPrint('カレンダーの登録状態を確認できませんでした: ${error.runtimeType}');
+    }
   }
 
   Future<void> _openCalendar() async {
@@ -154,6 +299,13 @@ class _HomePageState extends State<HomePage> {
             CalendarPage(repository: _calendarRepository, humanId: _humanId),
       ),
     );
+
+    if (!mounted) {
+      return;
+    }
+
+    // カレンダー側で予定が削除されている場合があるので、登録状態を確認し直す。
+    await _reconcileCalendarRegistration();
   }
 
   Widget _buildSection({
@@ -299,6 +451,86 @@ class _HomePageState extends State<HomePage> {
     );
   }
 
+  /// 今日の一歩をカレンダーへ追加するかどうかの、控えめな案内。
+  ///
+  /// Actionを決めたことと、カレンダーへ登録することは別の判断なので、
+  /// 追加するかどうかはHumanがここで選ぶ。
+  Widget _buildCalendarPrompt(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
+
+    if (_todayActionAddedToCalendar) {
+      return Row(
+        key: const Key('home_action_calendar_registered'),
+        children: [
+          Icon(
+            Icons.event_available_outlined,
+            size: 20,
+            color: colorScheme.primary,
+          ),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Text(
+              'この一歩はカレンダーに追加済みです。',
+              style: Theme.of(context).textTheme.bodyMedium,
+            ),
+          ),
+        ],
+      );
+    }
+
+    // 「今は追加しない」は「もう追加しない」ではない。
+    // 問いかけは閉じるが、あとから考え直せる操作は残す。
+    if (_calendarPromptDeclined) {
+      return Align(
+        key: const Key('home_action_calendar_deferred'),
+        alignment: Alignment.centerLeft,
+        child: TextButton.icon(
+          key: const Key('home_add_action_to_calendar_button'),
+          onPressed: _addTodayActionToCalendar,
+          icon: const Icon(Icons.event_outlined, size: 18),
+          label: const Text('カレンダーへの追加を考える'),
+        ),
+      );
+    }
+
+    return Column(
+      key: const Key('home_action_calendar_prompt'),
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Text(
+          'この一歩をカレンダーに追加しますか？',
+          style: Theme.of(context).textTheme.bodyMedium?.copyWith(height: 1.6),
+        ),
+        const SizedBox(height: 4),
+        Text(
+          '追加しなくても、今日の一歩はそのまま残ります。',
+          style: Theme.of(context).textTheme.bodySmall?.copyWith(height: 1.5),
+        ),
+        const SizedBox(height: 12),
+        Row(
+          children: [
+            Expanded(
+              child: OutlinedButton.icon(
+                key: const Key('home_add_action_to_calendar_button'),
+                onPressed: _addTodayActionToCalendar,
+                icon: const Icon(Icons.event_outlined),
+                label: const Text('カレンダーに追加'),
+              ),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: TextButton(
+                key: const Key('home_decline_action_calendar_button'),
+                onPressed: _declineCalendarPrompt,
+                child: const Text('今は追加しない'),
+              ),
+            ),
+          ],
+        ),
+      ],
+    );
+  }
+
   Widget _buildTodayActionCard(BuildContext context) {
     final action = _todayAction;
     final hasAction = action != null && action.isNotEmpty;
@@ -358,6 +590,10 @@ class _HomePageState extends State<HomePage> {
                 icon: const Icon(Icons.check),
                 label: const Text('できたと記録する'),
               ),
+              const SizedBox(height: 20),
+              const Divider(height: 1),
+              const SizedBox(height: 16),
+              _buildCalendarPrompt(context),
             ],
           ],
         ),
