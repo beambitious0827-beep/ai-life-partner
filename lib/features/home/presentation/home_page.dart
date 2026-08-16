@@ -14,6 +14,9 @@ import 'package:ai_life_partner/features/next_step/presentation/action_calendar_
 import 'package:ai_life_partner/features/next_step/presentation/calendar_availability.dart';
 import 'package:ai_life_partner/features/next_step/presentation/next_step_page.dart';
 import 'package:ai_life_partner/features/next_step/presentation/next_step_result.dart';
+import 'package:ai_life_partner/features/reflection/data/in_memory_reflection_repository.dart';
+import 'package:ai_life_partner/features/reflection/domain/repositories/reflection_repository.dart';
+import 'package:ai_life_partner/features/reflection/presentation/reflection_page.dart';
 import 'package:flutter/material.dart';
 
 class HomePage extends StatefulWidget {
@@ -25,6 +28,7 @@ class HomePage extends StatefulWidget {
     this.displayName,
     this.calendarRepository,
     this.journeyRepository,
+    this.reflectionRepository,
   });
 
   final String? displayName;
@@ -39,6 +43,9 @@ class HomePage extends StatefulWidget {
 
   /// 省略した場合は、アプリ内メモリのRepositoryを使用する。
   final JourneyRepository? journeyRepository;
+
+  /// 省略した場合は、アプリ内メモリのRepositoryを使用する。
+  final ReflectionRepository? reflectionRepository;
 
   @override
   State<HomePage> createState() => _HomePageState();
@@ -62,6 +69,11 @@ class _HomePageState extends State<HomePage> {
 
   late final JourneyRepository _journeyRepository =
       widget.journeyRepository ?? InMemoryJourneyRepository();
+
+  /// 振り返りは、Journeyからも振り返り一覧からも同じ内容が見えている必要がある。
+  /// そのため、画面ごとに作らず、この一つを渡して共有する。
+  late final ReflectionRepository _reflectionRepository =
+      widget.reflectionRepository ?? InMemoryReflectionRepository();
 
   /// Humanが最後に確定した次の一歩。
   ///
@@ -265,8 +277,27 @@ class _HomePageState extends State<HomePage> {
   Future<void> _openJourney() async {
     await Navigator.of(context).push<void>(
       MaterialPageRoute<void>(
-        builder: (context) =>
-            JourneyPage(repository: _journeyRepository, humanId: _humanId),
+        builder: (context) => JourneyPage(
+          repository: _journeyRepository,
+          reflectionRepository: _reflectionRepository,
+          humanId: _humanId,
+        ),
+      ),
+    );
+  }
+
+  /// これまでの振り返りを読み返す画面を開く。
+  ///
+  /// ここでは新しい振り返りを作らない。
+  /// 振り返りを始められるのは、対象になる歩みがある場所からだけにする。
+  Future<void> _openReflection() async {
+    await Navigator.of(context).push<void>(
+      MaterialPageRoute<void>(
+        builder: (context) => ReflectionPage(
+          reflectionRepository: _reflectionRepository,
+          journeyRepository: _journeyRepository,
+          humanId: _humanId,
+        ),
       ),
     );
   }
@@ -823,9 +854,9 @@ class _HomePageState extends State<HomePage> {
                         context: context,
                         icon: Icons.auto_stories_outlined,
                         title: '振り返る',
-                        description: '経験を振り返り、気付きを整理します。',
+                        description: '歩みについて感じたことを読み返します。',
                         onTap: () {
-                          _showComingSoon(context, 'Reflection機能は今後追加します');
+                          _openReflection();
                         },
                       ),
                       _buildQuickAction(

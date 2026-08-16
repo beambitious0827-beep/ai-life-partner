@@ -16,6 +16,10 @@ import 'package:ai_life_partner/features/journey/domain/repositories/journey_rep
 import 'package:ai_life_partner/features/journey/presentation/journey_page.dart';
 import 'package:ai_life_partner/features/journey/presentation/journey_record_page.dart';
 import 'package:ai_life_partner/features/next_step/presentation/next_step_page.dart';
+import 'package:ai_life_partner/features/reflection/data/in_memory_reflection_repository.dart';
+import 'package:ai_life_partner/features/reflection/domain/models/reflection_entry.dart';
+import 'package:ai_life_partner/features/reflection/domain/repositories/reflection_repository.dart';
+import 'package:ai_life_partner/features/reflection/presentation/reflection_page.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -88,6 +92,7 @@ Future<void> pumpHome(
   WidgetTester tester, {
   required CalendarRepository repository,
   JourneyRepository? journeyRepository,
+  ReflectionRepository? reflectionRepository,
 }) async {
   tester.view.physicalSize = const Size(1400, 5000);
   tester.view.devicePixelRatio = 1.0;
@@ -103,6 +108,7 @@ Future<void> pumpHome(
         supportPreferences: const <String>[],
         calendarRepository: repository,
         journeyRepository: journeyRepository,
+        reflectionRepository: reflectionRepository,
       ),
     ),
   );
@@ -197,6 +203,19 @@ Future<List<CalendarEvent>> readTodayEvents(
 /// その日に残っている歩みをすべて読み出す。
 Future<List<JourneyEntry>> readJourneyEntries(
   JourneyRepository repository,
+) async {
+  final now = DateTime.now();
+
+  return repository.getEntries(
+    humanId: humanId,
+    rangeStart: DateTime(now.year, now.month, now.day),
+    rangeEnd: DateTime(now.year, now.month, now.day + 1),
+  );
+}
+
+/// これまでに残された振り返りを読み出す。
+Future<List<ReflectionEntry>> readReflections(
+  ReflectionRepository repository,
 ) async {
   final now = DateTime.now();
 
@@ -1582,6 +1601,70 @@ void main() {
       // Homeも背後に残るため、一歩の文言は複数見つかる。
       expect(find.text(manualActionText), findsWidgets);
       expect(find.text('少し取り組んだ'), findsOneWidget);
+    });
+  });
+
+  group('歩みから振り返りへ', () {
+    testWidgets('Homeから振り返りの一覧を開ける', (tester) async {
+      await pumpHome(tester, repository: InMemoryCalendarRepository());
+
+      await tapByText(tester, '振り返る');
+
+      expect(find.byType(ReflectionPage), findsOneWidget);
+      expect(find.text('これまでの振り返り'), findsOneWidget);
+      expect(find.byKey(const Key('reflection_empty_state')), findsOneWidget);
+    });
+
+    testWidgets('歩みから残した振り返りが、振り返りの一覧でも読める', (tester) async {
+      final journeyRepository = InMemoryJourneyRepository();
+      final reflectionRepository = InMemoryReflectionRepository();
+
+      await pumpHome(
+        tester,
+        repository: InMemoryCalendarRepository(),
+        journeyRepository: journeyRepository,
+        reflectionRepository: reflectionRepository,
+      );
+
+      await confirmManualNextStep(tester);
+
+      await recordJourney(tester, JourneyOutcome.partial);
+
+      final journeyEntry = (await readJourneyEntries(journeyRepository)).single;
+
+      // 歩みの一覧から、その歩みを振り返る。
+      await tapByText(tester, '歩み');
+
+      expect(find.byType(JourneyPage), findsOneWidget);
+
+      await tapByKey(tester, Key('journey_reflect_button_${journeyEntry.id}'));
+
+      await tester.enterText(
+        find.byKey(const Key('reflection_record_feeling_field')),
+        '少し肩の力が抜けた',
+      );
+      await tester.pumpAndSettle();
+
+      await tapByKey(tester, const Key('reflection_record_save_button'));
+
+      expect(
+        find.byKey(Key('journey_reflected_label_${journeyEntry.id}')),
+        findsOneWidget,
+      );
+
+      await backToHome(tester);
+
+      // Homeの振り返り一覧も、同じRepositoryの内容を見ている。
+      await tapByText(tester, '振り返る');
+
+      expect(find.byType(ReflectionPage), findsOneWidget);
+      expect(find.byKey(const Key('reflection_empty_state')), findsNothing);
+      expect(find.text('振り返った歩み'), findsOneWidget);
+      expect(find.text('少し肩の力が抜けた'), findsOneWidget);
+
+      final reflections = await readReflections(reflectionRepository);
+
+      expect(reflections.single.journeyEntryId, journeyEntry.id);
     });
   });
 }
