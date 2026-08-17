@@ -1,3 +1,6 @@
+import 'package:ai_life_partner/features/insight/domain/models/insight_entry.dart';
+import 'package:ai_life_partner/features/insight/domain/repositories/insight_repository.dart';
+import 'package:ai_life_partner/features/insight/presentation/insight_record_page.dart';
 import 'package:ai_life_partner/features/journey/domain/models/journey_entry.dart';
 import 'package:ai_life_partner/features/journey/domain/repositories/journey_repository.dart';
 import 'package:ai_life_partner/features/reflection/domain/models/reflection_entry.dart';
@@ -8,11 +11,15 @@ import 'package:flutter/material.dart';
 ///
 /// 良い振り返り・悪い振り返りという区別はしない。
 /// 数や頻度も数えない。書かれた言葉をそのまま置いておく場所である。
+///
+/// 気づきを残したくなった振り返りがあれば、ここから始められる。
+/// ただし残すかどうかを決めるのはHumanで、ここでは促さない。
 class ReflectionPage extends StatefulWidget {
   const ReflectionPage({
     super.key,
     required this.reflectionRepository,
     required this.journeyRepository,
+    required this.insightRepository,
     required this.humanId,
   });
 
@@ -20,6 +27,9 @@ class ReflectionPage extends StatefulWidget {
 
   /// 振り返りの対象になった歩みを読むために使う。
   final JourneyRepository journeyRepository;
+
+  /// 振り返りごとに気づきが残っているかを確かめ、新しい気づきを保存する先。
+  final InsightRepository insightRepository;
 
   final String humanId;
 
@@ -30,14 +40,26 @@ class ReflectionPage extends StatefulWidget {
   State<ReflectionPage> createState() => _ReflectionPageState();
 }
 
-/// 振り返りと、その対象になった歩みの組。
+/// ひとつの振り返りについて、気づきがどうなっているか。
+///
+/// 「まだ残していない」と「確かめられなかった」は違う。
+/// 確かめられていないのに気づきを促すと、
+/// すでに残した気づきをもう一度書かせてしまうため、区別して扱う。
+enum _InsightStatus { none, present, unknown }
+
+/// 振り返りと、その対象になった歩み、そして気づきの状態の組。
 ///
 /// 歩みが見つからないこともあるため、[journeyEntry] はnullを許す。
 class _ReflectionListItem {
-  const _ReflectionListItem({required this.reflection, this.journeyEntry});
+  const _ReflectionListItem({
+    required this.reflection,
+    required this.insightStatus,
+    this.journeyEntry,
+  });
 
   final ReflectionEntry reflection;
   final JourneyEntry? journeyEntry;
+  final _InsightStatus insightStatus;
 }
 
 class _ReflectionPageState extends State<ReflectionPage> {
@@ -45,6 +67,21 @@ class _ReflectionPageState extends State<ReflectionPage> {
 
   bool _isLoading = true;
   Object? _loadError;
+
+  /// 発行した確認の通し番号。あとから発行したものほど新しい。
+  int _requestSequence = 0;
+
+  /// いま画面が受け入れる、全体の読み込みの番号。
+  int _loadRequestId = 0;
+
+  /// 振り返りIDごとに、いま受け入れる気づき確認の番号。
+  ///
+  /// 確認は頼んだ順に返ってくるとはかぎらない。
+  /// 古い確認の結果が新しい状態を上書きしないよう、最新の番号だけを覚えておく。
+  final Map<String, int> _insightRequestIds = <String, int>{};
+
+  /// いま気づきの状態を確認し直している振り返り。
+  final Set<String> _recheckingReflectionIds = <String>{};
 
   @override
   void initState() {
@@ -54,42 +91,35 @@ class _ReflectionPageState extends State<ReflectionPage> {
   }
 
   Future<void> _loadItems() async {
+    final requestId = ++_requestSequence;
+
     setState(() {
+      _loadRequestId = requestId;
+
+      // 読み直しを始めた時点で、走っている個別の確認はすべて古くなる。
+      // あとから返ってきても、この読み込みの結果を書き換えさせない。
+      _insightRequestIds.clear();
+      _recheckingReflectionIds.clear();
+
       _isLoading = true;
       _loadError = null;
     });
 
+    final List<ReflectionEntry> reflections;
+
+    // 振り返りは主たる記録なので、その取得だけを分けて扱う。
     try {
       final now = DateTime.now();
 
-      final reflections = await widget.reflectionRepository.getEntries(
+      reflections = await widget.reflectionRepository.getEntries(
         humanId: widget.humanId,
         rangeStart: now.subtract(ReflectionPage.visibleRange),
         // 残した瞬間の振り返りも含めるため、少し先までを範囲にする。
         rangeEnd: now.add(const Duration(days: 1)),
       );
-
-      final items = <_ReflectionListItem>[];
-
-      for (final reflection in reflections) {
-        items.add(
-          _ReflectionListItem(
-            reflection: reflection,
-            journeyEntry: await _readJourneyEntry(reflection),
-          ),
-        );
-      }
-
-      if (!mounted) {
-        return;
-      }
-
-      setState(() {
-        _items = items;
-        _isLoading = false;
-      });
     } on Object catch (error) {
-      if (!mounted) {
+      // 待っている間に新しい読み込みが始まっていたら、この結果はもう古い。
+      if (!mounted || _loadRequestId != requestId) {
         return;
       }
 
@@ -97,7 +127,115 @@ class _ReflectionPageState extends State<ReflectionPage> {
         _loadError = error;
         _isLoading = false;
       });
+
+      return;
     }
+
+    // 歩みも気づきも、振り返りに付く任意の情報でしかない。
+    // ここで何が起きても振り返りそのものは必ず表示する。
+    final items = <_ReflectionListItem>[];
+
+    for (final reflection in reflections) {
+      // この読み込みが、その振り返りの最新の確認であることを記録する。
+      _insightRequestIds[reflection.id] = requestId;
+
+      items.add(
+        _ReflectionListItem(
+          reflection: reflection,
+          journeyEntry: await _readJourneyEntry(reflection),
+          insightStatus: await _readInsightStatus(reflection),
+        ),
+      );
+    }
+
+    if (!mounted || _loadRequestId != requestId) {
+      return;
+    }
+
+    setState(() {
+      _items = items;
+      _isLoading = false;
+    });
+  }
+
+  /// ひとつの振り返りについて、気づきの状態を確かめる。
+  ///
+  /// 1件確かめられなくても、他の振り返りの状態には影響させない。
+  Future<_InsightStatus> _readInsightStatus(ReflectionEntry reflection) async {
+    try {
+      final insight = await widget.insightRepository.getEntryForReflection(
+        humanId: widget.humanId,
+        reflectionEntryId: reflection.id,
+      );
+
+      return insight == null ? _InsightStatus.none : _InsightStatus.present;
+    } on Object catch (_) {
+      // 気づきがあるともないとも言えない。分からないままにしておく。
+      return _InsightStatus.unknown;
+    }
+  }
+
+  /// ひとつの振り返りについてだけ、気づきの状態を確かめ直す。
+  ///
+  /// 同じ振り返りの確認を重ねて増やさない。
+  /// また、待っている間に新しい確認や読み直しが始まっていた場合は、
+  /// 成功でも失敗でもこの結果を捨てる。古い答えで新しい状態を戻さないため。
+  Future<void> _recheckInsightStatus(ReflectionEntry reflection) async {
+    if (_isLoading || _recheckingReflectionIds.contains(reflection.id)) {
+      return;
+    }
+
+    final requestId = ++_requestSequence;
+
+    setState(() {
+      _insightRequestIds[reflection.id] = requestId;
+      _recheckingReflectionIds.add(reflection.id);
+    });
+
+    final status = await _readInsightStatus(reflection);
+
+    if (!mounted || _insightRequestIds[reflection.id] != requestId) {
+      return;
+    }
+
+    setState(() {
+      _recheckingReflectionIds.remove(reflection.id);
+
+      _items = _items.map((item) {
+        if (item.reflection.id != reflection.id) {
+          return item;
+        }
+
+        return _ReflectionListItem(
+          reflection: item.reflection,
+          journeyEntry: item.journeyEntry,
+          insightStatus: status,
+        );
+      }).toList();
+    });
+  }
+
+  /// ひとつの振り返りについて、気づきを残す画面を開く。
+  ///
+  /// ここではInsightEntryを作らない。
+  /// 気づきの画面でHumanが「気づきを残す」を押したときだけ保存される。
+  Future<void> _openInsightRecord(ReflectionEntry reflection) async {
+    final saved = await Navigator.of(context).push<InsightEntry>(
+      MaterialPageRoute<InsightEntry>(
+        builder: (context) => InsightRecordPage(
+          repository: widget.insightRepository,
+          humanId: widget.humanId,
+          reflectionEntry: reflection,
+        ),
+      ),
+    );
+
+    if (!mounted || saved == null) {
+      return;
+    }
+
+    // 保存された事実は画面のフラグではなくRepositoryから読み直す。
+    await _loadItems();
   }
 
   /// 振り返りのもとになった歩みを読む。
@@ -157,6 +295,79 @@ class _ReflectionPageState extends State<ReflectionPage> {
     );
   }
 
+  /// 気づきが残っていることの、控えめな表示。
+  Widget _buildInsightRecordedLabel(ReflectionEntry reflection) {
+    return Row(
+      key: Key('reflection_insight_recorded_${reflection.id}'),
+      children: [
+        Icon(
+          Icons.lightbulb_outline,
+          size: 20,
+          color: Theme.of(context).colorScheme.primary,
+        ),
+        const SizedBox(width: 8),
+        Text('気づきを残しました', style: Theme.of(context).textTheme.bodyMedium),
+      ],
+    );
+  }
+
+  /// 気づきの状態が確かめられなかったときの表示。
+  ///
+  /// ここでは「この振り返りから気づきを残す」を出さない。
+  /// すでに残した気づきがあるかどうか分からないまま書き始めると、
+  /// 同じ振り返りへ二つ目の気づきを作らせてしまうため。
+  Widget _buildInsightUnknown(ReflectionEntry reflection) {
+    final isRechecking = _recheckingReflectionIds.contains(reflection.id);
+
+    return Column(
+      key: Key('reflection_insight_unknown_${reflection.id}'),
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          '気づきの状態を確認できませんでした。',
+          style: Theme.of(context).textTheme.bodyMedium,
+        ),
+        const SizedBox(height: 8),
+        OutlinedButton(
+          key: Key('reflection_insight_recheck_button_${reflection.id}'),
+          // 確認中は押せないようにして、同じ確認をいくつも走らせない。
+          onPressed: isRechecking
+              ? null
+              : () {
+                  _recheckInsightStatus(reflection);
+                },
+          child: Text(isRechecking ? '確認しています…' : 'もう一度確認する'),
+        ),
+      ],
+    );
+  }
+
+  /// 気づきへの入り口。
+  ///
+  /// 「まだ気づきを残していない」ことを欠けている状態として見せない。
+  Widget _buildInsightAction(_ReflectionListItem item) {
+    final reflection = item.reflection;
+
+    switch (item.insightStatus) {
+      case _InsightStatus.present:
+        return _buildInsightRecordedLabel(reflection);
+      case _InsightStatus.unknown:
+        return _buildInsightUnknown(reflection);
+      case _InsightStatus.none:
+        return Align(
+          alignment: Alignment.centerLeft,
+          child: OutlinedButton.icon(
+            key: Key('reflection_insight_button_${reflection.id}'),
+            onPressed: () {
+              _openInsightRecord(reflection);
+            },
+            icon: const Icon(Icons.lightbulb_outline),
+            label: const Text('この振り返りから気づきを残す'),
+          ),
+        );
+    }
+  }
+
   Widget _buildItemCard(_ReflectionListItem item) {
     final reflection = item.reflection;
     final journeyEntry = item.journeyEntry;
@@ -195,6 +406,8 @@ class _ReflectionPageState extends State<ReflectionPage> {
               const SizedBox(height: 16),
               _buildLabelledText('気づいたこと', reflection.noticedText!),
             ],
+            const SizedBox(height: 20),
+            _buildInsightAction(item),
           ],
         ),
       ),

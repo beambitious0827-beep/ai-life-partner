@@ -9,6 +9,11 @@ import 'package:ai_life_partner/features/calendar/domain/repositories/calendar_r
 import 'package:ai_life_partner/features/calendar/presentation/calendar_page.dart';
 import 'package:ai_life_partner/features/calendar/presentation/event_editor_page.dart';
 import 'package:ai_life_partner/features/home/presentation/home_page.dart';
+import 'package:ai_life_partner/features/insight/data/in_memory_insight_repository.dart';
+import 'package:ai_life_partner/features/insight/domain/models/insight_entry.dart';
+import 'package:ai_life_partner/features/insight/domain/repositories/insight_repository.dart';
+import 'package:ai_life_partner/features/insight/presentation/insight_page.dart';
+import 'package:ai_life_partner/features/insight/presentation/insight_record_page.dart';
 import 'package:ai_life_partner/features/journey/data/in_memory_journey_repository.dart';
 import 'package:ai_life_partner/features/journey/domain/models/journey_entry.dart';
 import 'package:ai_life_partner/features/journey/domain/models/journey_outcome.dart';
@@ -93,6 +98,7 @@ Future<void> pumpHome(
   required CalendarRepository repository,
   JourneyRepository? journeyRepository,
   ReflectionRepository? reflectionRepository,
+  InsightRepository? insightRepository,
 }) async {
   tester.view.physicalSize = const Size(1400, 5000);
   tester.view.devicePixelRatio = 1.0;
@@ -109,6 +115,7 @@ Future<void> pumpHome(
         calendarRepository: repository,
         journeyRepository: journeyRepository,
         reflectionRepository: reflectionRepository,
+        insightRepository: insightRepository,
       ),
     ),
   );
@@ -217,6 +224,17 @@ Future<List<JourneyEntry>> readJourneyEntries(
 Future<List<ReflectionEntry>> readReflections(
   ReflectionRepository repository,
 ) async {
+  final now = DateTime.now();
+
+  return repository.getEntries(
+    humanId: humanId,
+    rangeStart: DateTime(now.year, now.month, now.day),
+    rangeEnd: DateTime(now.year, now.month, now.day + 1),
+  );
+}
+
+/// これまでに残された気づきを読み出す。
+Future<List<InsightEntry>> readInsights(InsightRepository repository) async {
   final now = DateTime.now();
 
   return repository.getEntries(
@@ -1665,6 +1683,103 @@ void main() {
       final reflections = await readReflections(reflectionRepository);
 
       expect(reflections.single.journeyEntryId, journeyEntry.id);
+    });
+  });
+
+  group('振り返りから気づきへ', () {
+    testWidgets('Homeから気づきの一覧を開ける', (tester) async {
+      await pumpHome(tester, repository: InMemoryCalendarRepository());
+
+      await tapByText(tester, '気づき');
+
+      expect(find.byType(InsightPage), findsOneWidget);
+      expect(find.text('これまでの気づき'), findsOneWidget);
+      expect(find.byKey(const Key('insight_empty_state')), findsOneWidget);
+    });
+
+    testWidgets('振り返りから残した気づきが、気づきの一覧でも読める', (tester) async {
+      final journeyRepository = InMemoryJourneyRepository();
+      final reflectionRepository = InMemoryReflectionRepository();
+      final insightRepository = InMemoryInsightRepository();
+
+      await pumpHome(
+        tester,
+        repository: InMemoryCalendarRepository(),
+        journeyRepository: journeyRepository,
+        reflectionRepository: reflectionRepository,
+        insightRepository: insightRepository,
+      );
+
+      await confirmManualNextStep(tester);
+
+      await recordJourney(tester, JourneyOutcome.rested);
+
+      final journeyEntry = (await readJourneyEntries(journeyRepository)).single;
+
+      // 歩みの一覧から、その歩みを振り返る。
+      await tapByText(tester, '歩み');
+
+      expect(find.byType(JourneyPage), findsOneWidget);
+
+      await tapByKey(tester, Key('journey_reflect_button_${journeyEntry.id}'));
+
+      await tester.enterText(
+        find.byKey(const Key('reflection_record_feeling_field')),
+        '思ったより疲れていた',
+      );
+      await tester.pumpAndSettle();
+
+      await tapByKey(tester, const Key('reflection_record_save_button'));
+
+      await backToHome(tester);
+
+      // 振り返りの一覧から、その振り返りの気づきを残す。
+      await tapByText(tester, '振り返る');
+
+      expect(find.byType(ReflectionPage), findsOneWidget);
+
+      final reflection = (await readReflections(reflectionRepository)).single;
+
+      await tapByKey(tester, Key('reflection_insight_button_${reflection.id}'));
+
+      expect(find.byType(InsightRecordPage), findsOneWidget);
+
+      // 気づきの画面からも、元の振り返りが読める。
+      expect(
+        find.descendant(
+          of: find.byKey(const Key('insight_record_reflection_summary')),
+          matching: find.text('思ったより疲れていた'),
+        ),
+        findsOneWidget,
+      );
+
+      await tester.enterText(
+        find.byKey(const Key('insight_record_text_field')),
+        '休むことも前に進むために必要。',
+      );
+      await tester.pumpAndSettle();
+
+      await tapByKey(tester, const Key('insight_record_save_button'));
+
+      expect(
+        find.byKey(Key('reflection_insight_recorded_${reflection.id}')),
+        findsOneWidget,
+      );
+
+      await backToHome(tester);
+
+      // Homeの気づき一覧も、同じRepositoryの内容を見ている。
+      await tapByText(tester, '気づき');
+
+      expect(find.byType(InsightPage), findsOneWidget);
+      expect(find.byKey(const Key('insight_empty_state')), findsNothing);
+      expect(find.text('見つけた気づき'), findsOneWidget);
+      expect(find.text('休むことも前に進むために必要。'), findsOneWidget);
+      expect(find.text('思ったより疲れていた'), findsOneWidget);
+
+      final insights = await readInsights(insightRepository);
+
+      expect(insights.single.reflectionEntryId, reflection.id);
     });
   });
 }
