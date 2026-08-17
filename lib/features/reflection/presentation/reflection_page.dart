@@ -1,5 +1,6 @@
 import 'package:ai_life_partner/features/insight/domain/models/insight_entry.dart';
 import 'package:ai_life_partner/features/insight/domain/repositories/insight_repository.dart';
+import 'package:ai_life_partner/features/insight/domain/services/reflection_thinking_assistant.dart';
 import 'package:ai_life_partner/features/insight/presentation/insight_record_page.dart';
 import 'package:ai_life_partner/features/journey/domain/models/journey_entry.dart';
 import 'package:ai_life_partner/features/journey/domain/repositories/journey_repository.dart';
@@ -20,6 +21,7 @@ class ReflectionPage extends StatefulWidget {
     required this.reflectionRepository,
     required this.journeyRepository,
     required this.insightRepository,
+    required this.thinkingAssistant,
     required this.humanId,
   });
 
@@ -30,6 +32,11 @@ class ReflectionPage extends StatefulWidget {
 
   /// 振り返りごとに気づきが残っているかを確かめ、新しい気づきを保存する先。
   final InsightRepository insightRepository;
+
+  /// 気づきの画面でHumanが望んだときだけ使う、考える材料の取り寄せ先。
+  ///
+  /// この画面では呼ばない。渡すだけにして、開始はHumanの操作にゆだねる。
+  final ReflectionThinkingAssistant thinkingAssistant;
 
   final String humanId;
 
@@ -224,6 +231,7 @@ class _ReflectionPageState extends State<ReflectionPage> {
       MaterialPageRoute<InsightEntry>(
         builder: (context) => InsightRecordPage(
           repository: widget.insightRepository,
+          thinkingAssistant: widget.thinkingAssistant,
           humanId: widget.humanId,
           reflectionEntry: reflection,
         ),

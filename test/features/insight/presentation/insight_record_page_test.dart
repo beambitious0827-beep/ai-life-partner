@@ -1,8 +1,12 @@
 import 'dart:async';
 
+import 'package:ai_life_partner/features/insight/data/demo_reflection_thinking_assistant.dart';
 import 'package:ai_life_partner/features/insight/data/in_memory_insight_repository.dart';
 import 'package:ai_life_partner/features/insight/domain/models/insight_entry.dart';
+import 'package:ai_life_partner/features/insight/domain/models/reflection_thinking_request.dart';
+import 'package:ai_life_partner/features/insight/domain/models/reflection_thinking_support.dart';
 import 'package:ai_life_partner/features/insight/domain/repositories/insight_repository.dart';
+import 'package:ai_life_partner/features/insight/domain/services/reflection_thinking_assistant.dart';
 import 'package:ai_life_partner/features/insight/presentation/insight_record_page.dart';
 import 'package:ai_life_partner/features/reflection/domain/models/reflection_entry.dart';
 import 'package:flutter/material.dart';
@@ -13,6 +17,109 @@ const String humanId = 'local-human';
 const Key insightFieldKey = Key('insight_record_text_field');
 const Key saveButtonKey = Key('insight_record_save_button');
 const Key cancelButtonKey = Key('insight_record_cancel_button');
+const Key thinkingButtonKey = Key('insight_record_thinking_button');
+const Key thinkingSupportKey = Key('insight_record_thinking_support');
+const Key thinkingDemoNoticeKey = Key('insight_record_thinking_demo_notice');
+
+ReflectionThinkingSupport createSupport({String label = 'A'}) {
+  return ReflectionThinkingSupport(
+    questions: <String>['$label の問い'],
+    perspectives: <String>['$label の別の見方'],
+    possibilities: <String>['$label の可能性'],
+  );
+}
+
+/// 受け取った材料を記録し、すぐに答えるAssistant。
+class RecordingThinkingAssistant implements ReflectionThinkingAssistant {
+  RecordingThinkingAssistant({
+    this.isDemo = true,
+    ReflectionThinkingSupport? result,
+    this.failingCallCount = 0,
+  }) : result = result ?? createSupport();
+
+  @override
+  final bool isDemo;
+
+  final ReflectionThinkingSupport result;
+
+  /// 最初の何回を失敗させるか。
+  final int failingCallCount;
+
+  /// AIへ渡された材料。ここに何が入るかがそのまま境界の確認になる。
+  final List<ReflectionThinkingRequest> receivedRequests =
+      <ReflectionThinkingRequest>[];
+
+  int get callCount => receivedRequests.length;
+
+  @override
+  Future<ReflectionThinkingSupport> support(
+    ReflectionThinkingRequest request,
+  ) async {
+    receivedRequests.add(request);
+
+    if (receivedRequests.length <= failingCallCount) {
+      throw StateError('AIと一緒に考えられませんでした');
+    }
+
+    return result;
+  }
+}
+
+/// 呼び出しごとに答えを保留できるAssistant。
+///
+/// 考えている途中の状態を止めたまま確かめたり、
+/// 頼み直しのたびに何回呼ばれたかを数えたりするために使う。
+class GatedThinkingAssistant implements ReflectionThinkingAssistant {
+  @override
+  bool get isDemo => true;
+
+  final List<ReflectionThinkingRequest> receivedRequests =
+      <ReflectionThinkingRequest>[];
+
+  final List<Completer<void>> _gates = <Completer<void>>[];
+
+  /// 呼び出しの順番ごとの答え。
+  final Map<int, ReflectionThinkingSupport> results =
+      <int, ReflectionThinkingSupport>{};
+
+  /// 失敗として終わらせる呼び出しの順番。
+  final Set<int> failingCalls = <int>{};
+
+  int get callCount => receivedRequests.length;
+
+  bool isPending(int callIndex) {
+    return callIndex < _gates.length && !_gates[callIndex].isCompleted;
+  }
+
+  void release(int callIndex) {
+    final gate = _gates[callIndex];
+
+    if (!gate.isCompleted) {
+      gate.complete();
+    }
+  }
+
+  @override
+  Future<ReflectionThinkingSupport> support(
+    ReflectionThinkingRequest request,
+  ) async {
+    final callIndex = receivedRequests.length;
+
+    receivedRequests.add(request);
+
+    final gate = Completer<void>();
+
+    _gates.add(gate);
+
+    await gate.future;
+
+    if (failingCalls.contains(callIndex)) {
+      throw StateError('AIと一緒に考えられませんでした');
+    }
+
+    return results[callIndex] ?? createSupport();
+  }
+}
 
 ReflectionEntry createReflectionEntry({
   String id = 'reflection-1',
@@ -42,6 +149,7 @@ class ResultHolder {
 Future<ResultHolder> pumpRecordPage(
   WidgetTester tester, {
   required InsightRepository repository,
+  ReflectionThinkingAssistant? assistant,
   ReflectionEntry? reflectionEntry,
   String recordingHumanId = humanId,
 }) async {
@@ -65,6 +173,9 @@ Future<ResultHolder> pumpRecordPage(
                     MaterialPageRoute<InsightEntry>(
                       builder: (context) => InsightRecordPage(
                         repository: repository,
+                        thinkingAssistant:
+                            assistant ??
+                            const DemoReflectionThinkingAssistant(),
                         humanId: recordingHumanId,
                         reflectionEntry: entry,
                       ),
@@ -447,10 +558,12 @@ void main() {
   group('InsightRecordPage Humanの境界', () {
     testWidgets('別のHumanの振り返りからは、気づきを残せない', (tester) async {
       final repository = InMemoryInsightRepository();
+      final assistant = RecordingThinkingAssistant();
 
       final holder = await pumpRecordPage(
         tester,
         repository: repository,
+        assistant: assistant,
         reflectionEntry: createReflectionEntry(
           humanId: 'other-human',
           feelingText: '他のHumanが感じたこと',
@@ -469,6 +582,11 @@ void main() {
       expect(find.byKey(insightFieldKey), findsNothing);
       expect(find.byKey(saveButtonKey), findsNothing);
 
+      // AIと一緒に考えることも始められない。
+      expect(find.byKey(thinkingButtonKey), findsNothing);
+      expect(find.text('AIと一緒に考える'), findsNothing);
+      expect(assistant.callCount, 0);
+
       // 別のHumanの振り返りの内容も見せない。
       expect(find.text('他のHumanが感じたこと'), findsNothing);
       expect(find.text('他のHumanが気づいたこと'), findsNothing);
@@ -479,6 +597,7 @@ void main() {
       expect(find.byType(InsightRecordPage), findsNothing);
       expect(holder.value, isNull);
       expect(await readEntries(repository), isEmpty);
+      expect(assistant.callCount, 0);
     });
 
     testWidgets('自分の振り返りであれば、これまでどおり気づきを残せる', (tester) async {
@@ -622,6 +741,434 @@ void main() {
       );
 
       expect(holder.value?.id, firstId);
+    });
+  });
+
+  group('InsightRecordPage AIと一緒に考える', () {
+    testWidgets('画面を開いただけでは、AIを呼ばない', (tester) async {
+      final assistant = RecordingThinkingAssistant();
+
+      await pumpRecordPage(
+        tester,
+        repository: InMemoryInsightRepository(),
+        assistant: assistant,
+      );
+
+      expect(assistant.callCount, 0);
+      expect(find.byKey(thinkingSupportKey), findsNothing);
+
+      // 入り口はあるが、押すかどうかはHumanが決める。
+      expect(find.byKey(thinkingButtonKey), findsOneWidget);
+      expect(find.text('AIと一緒に考える'), findsOneWidget);
+      expect(find.text('答えではなく、考えるためのヒントです。今は使わなくても大丈夫です。'), findsOneWidget);
+    });
+
+    testWidgets('気づきを書いただけでは、AIを呼ばない', (tester) async {
+      final assistant = RecordingThinkingAssistant();
+
+      await pumpRecordPage(
+        tester,
+        repository: InMemoryInsightRepository(),
+        assistant: assistant,
+      );
+
+      await tester.enterText(find.byKey(insightFieldKey), '休んでよかった。');
+      await tester.pumpAndSettle();
+
+      expect(assistant.callCount, 0);
+    });
+
+    testWidgets('デモの実装であることを、控えめに伝える', (tester) async {
+      await pumpRecordPage(
+        tester,
+        repository: InMemoryInsightRepository(),
+        assistant: RecordingThinkingAssistant(),
+      );
+
+      expect(find.byKey(thinkingDemoNoticeKey), findsOneWidget);
+      expect(find.text('AI思考サポート デモ'), findsOneWidget);
+    });
+
+    testWidgets('デモでない実装では、デモの断り書きを出さない', (tester) async {
+      await pumpRecordPage(
+        tester,
+        repository: InMemoryInsightRepository(),
+        assistant: RecordingThinkingAssistant(isDemo: false),
+      );
+
+      expect(find.byKey(thinkingDemoNoticeKey), findsNothing);
+      expect(find.text('AI思考サポート デモ'), findsNothing);
+    });
+
+    testWidgets('Humanが押したときだけ、選んだ振り返りの言葉だけをAIへ渡す', (tester) async {
+      final repository = InMemoryInsightRepository();
+      final assistant = RecordingThinkingAssistant();
+
+      await pumpRecordPage(
+        tester,
+        repository: repository,
+        assistant: assistant,
+        reflectionEntry: createReflectionEntry(
+          id: 'reflection-42',
+          feelingText: '思ったより疲れていた',
+          noticedText: '休んだことで少し気持ちが軽くなった',
+        ),
+      );
+
+      await tapByKey(tester, thinkingButtonKey);
+
+      expect(assistant.callCount, 1);
+
+      final request = assistant.receivedRequests.single;
+
+      // 渡ったのは、Humanが選んだその振り返りの言葉だけ。
+      expect(request.reflectionEntryId, 'reflection-42');
+      expect(request.feelingText, '思ったより疲れていた');
+      expect(request.noticedText, '休んだことで少し気持ちが軽くなった');
+
+      // 呼んだだけでは、気づきは1件も保存されない。
+      expect(await readEntries(repository), isEmpty);
+    });
+
+    testWidgets('考えるためのヒントとして、問い・別の見方・可能性を表示する', (tester) async {
+      final repository = InMemoryInsightRepository();
+
+      await pumpRecordPage(
+        tester,
+        repository: repository,
+        assistant: RecordingThinkingAssistant(result: createSupport()),
+      );
+
+      await tapByKey(tester, thinkingButtonKey);
+
+      expect(find.byKey(thinkingSupportKey), findsOneWidget);
+      expect(find.text('考えるためのヒント'), findsOneWidget);
+      expect(find.text('問い'), findsOneWidget);
+      expect(find.text('A の問い'), findsOneWidget);
+      expect(find.text('別の見方'), findsOneWidget);
+      expect(find.text('A の別の見方'), findsOneWidget);
+      expect(find.text('可能性'), findsOneWidget);
+      expect(find.text('A の可能性'), findsOneWidget);
+
+      // 気づきの入力欄は、AIの言葉で勝手に埋まらない。
+      expect(
+        tester.widget<TextField>(find.byKey(insightFieldKey)).controller?.text,
+        '',
+      );
+
+      // AIの言葉だけでは、気づきは保存されない。
+      expect(await readEntries(repository), isEmpty);
+    });
+
+    testWidgets('AIの言葉を読んだあとも、気づきを残すのはHuman自身', (tester) async {
+      final repository = InMemoryInsightRepository();
+
+      await pumpRecordPage(
+        tester,
+        repository: repository,
+        assistant: RecordingThinkingAssistant(),
+      );
+
+      await tapByKey(tester, thinkingButtonKey);
+
+      expect(await readEntries(repository), isEmpty);
+
+      await tester.enterText(find.byKey(insightFieldKey), '休むことも前に進むために必要。');
+      await tester.pumpAndSettle();
+
+      expect(await readEntries(repository), isEmpty);
+
+      await tapByKey(tester, saveButtonKey);
+
+      final entry = (await readEntries(repository)).single;
+
+      // 残るのはHumanが書いた言葉だけで、AIの言葉は混ざらない。
+      expect(entry.insightText, '休むことも前に進むために必要。');
+      expect(entry.insightText.contains('の問い'), isFalse);
+      expect(entry.insightText.contains('の別の見方'), isFalse);
+    });
+
+    testWidgets('AIを使わなくても、これまでどおり気づきを残せる', (tester) async {
+      final repository = InMemoryInsightRepository();
+      final assistant = RecordingThinkingAssistant();
+
+      await pumpRecordPage(
+        tester,
+        repository: repository,
+        assistant: assistant,
+      );
+
+      await tester.enterText(find.byKey(insightFieldKey), '休んでよかった。');
+      await tester.pumpAndSettle();
+
+      await tapByKey(tester, saveButtonKey);
+
+      expect((await readEntries(repository)).single.insightText, '休んでよかった。');
+      expect(assistant.callCount, 0);
+    });
+
+    testWidgets('考えている間は、続けて頼めない', (tester) async {
+      final assistant = GatedThinkingAssistant();
+
+      await pumpRecordPage(
+        tester,
+        repository: InMemoryInsightRepository(),
+        assistant: assistant,
+      );
+
+      // 考えている間は表示がアニメーションするため、pumpAndSettleは使わない。
+      await tester.tap(find.byKey(thinkingButtonKey));
+      await tester.pump();
+
+      expect(assistant.callCount, 1);
+      expect(assistant.isPending(0), isTrue);
+
+      expect(find.text('一緒に考えています…'), findsOneWidget);
+      expect(find.byType(CircularProgressIndicator), findsOneWidget);
+      expect(isButtonEnabled(tester, thinkingButtonKey), isFalse);
+
+      // 気づきの入力は止めない。AIと保存は別の操作である。
+      expect(isFieldEnabled(tester, insightFieldKey), isTrue);
+
+      assistant.results[0] = createSupport();
+      assistant.release(0);
+
+      await tester.pumpAndSettle();
+
+      expect(assistant.callCount, 1);
+      expect(find.text('A の問い'), findsOneWidget);
+      expect(find.text('もう一度一緒に考える'), findsOneWidget);
+      expect(isButtonEnabled(tester, thinkingButtonKey), isTrue);
+    });
+
+    testWidgets('AIと一緒に考えられなくても、気づきは残せる', (tester) async {
+      final repository = InMemoryInsightRepository();
+      final assistant = RecordingThinkingAssistant(failingCallCount: 1);
+
+      await pumpRecordPage(
+        tester,
+        repository: repository,
+        assistant: assistant,
+      );
+
+      await tapByKey(tester, thinkingButtonKey);
+
+      expect(assistant.callCount, 1);
+      expect(find.byType(InsightRecordPage), findsOneWidget);
+      expect(
+        find.text('今はAIと一緒に考えることができませんでした。自分の言葉で気づきを残すことはできます。'),
+        findsOneWidget,
+      );
+
+      // 振り返りの内容も、気づきの入力も、保存もそのまま使える。
+      expect(find.text('元の振り返り'), findsOneWidget);
+      expect(find.text('思ったより疲れていた'), findsOneWidget);
+      expect(isFieldEnabled(tester, insightFieldKey), isTrue);
+      expect(isButtonEnabled(tester, saveButtonKey), isTrue);
+      expect(await readEntries(repository), isEmpty);
+
+      // Humanが望めば、もう一度頼める。
+      expect(isButtonEnabled(tester, thinkingButtonKey), isTrue);
+
+      await tapByKey(tester, thinkingButtonKey);
+
+      expect(assistant.callCount, 2);
+      expect(find.byKey(thinkingSupportKey), findsOneWidget);
+      expect(find.text('A の問い'), findsOneWidget);
+
+      // AIが失敗していた間も、気づきはHumanの操作でそのまま残せる。
+      await tester.enterText(find.byKey(insightFieldKey), '休んでよかった。');
+      await tester.pumpAndSettle();
+
+      await tapByKey(tester, saveButtonKey);
+
+      expect((await readEntries(repository)).single.insightText, '休んでよかった。');
+    });
+
+    testWidgets('AIが失敗しても、Humanだけで気づきを残せる', (tester) async {
+      final repository = InMemoryInsightRepository();
+
+      await pumpRecordPage(
+        tester,
+        repository: repository,
+        assistant: RecordingThinkingAssistant(failingCallCount: 5),
+      );
+
+      await tapByKey(tester, thinkingButtonKey);
+
+      await tester.enterText(find.byKey(insightFieldKey), '休んでよかった。');
+      await tester.pumpAndSettle();
+
+      await tapByKey(tester, saveButtonKey);
+
+      expect(find.byType(InsightRecordPage), findsNothing);
+      expect((await readEntries(repository)).single.insightText, '休んでよかった。');
+    });
+
+    testWidgets('すばやく二度押しても、頼むのは一度だけ', (tester) async {
+      final assistant = GatedThinkingAssistant();
+
+      await pumpRecordPage(
+        tester,
+        repository: InMemoryInsightRepository(),
+        assistant: assistant,
+      );
+
+      final button = find.byKey(thinkingButtonKey);
+
+      await tester.ensureVisible(button);
+      await tester.pumpAndSettle();
+
+      // 同じフレームのうちに二度押される。
+      // 画面はまだ作り直されていないので、ボタンは見た目上まだ押せる。
+      await tester.tap(button);
+      await tester.tap(button);
+      await tester.pump();
+
+      // それでも、AIへ頼むのは一度だけ。
+      expect(assistant.callCount, 1);
+      expect(assistant.isPending(0), isTrue);
+
+      expect(find.text('一緒に考えています…'), findsOneWidget);
+      expect(isButtonEnabled(tester, thinkingButtonKey), isFalse);
+
+      assistant.results[0] = createSupport(label: 'A');
+      assistant.release(0);
+
+      await tester.pumpAndSettle();
+
+      // 待っていた一度分の答えだけが返り、余分な依頼は残っていない。
+      expect(assistant.callCount, 1);
+      expect(find.text('A の問い'), findsOneWidget);
+      expect(find.text('A の別の見方'), findsOneWidget);
+    });
+
+    testWidgets('失敗のあとにもう一度頼めて、そのときは新しい結果だけが残る', (tester) async {
+      final assistant = GatedThinkingAssistant();
+
+      await pumpRecordPage(
+        tester,
+        repository: InMemoryInsightRepository(),
+        assistant: assistant,
+      );
+
+      final button = find.byKey(thinkingButtonKey);
+
+      await tester.ensureVisible(button);
+      await tester.pumpAndSettle();
+
+      // 1回目は失敗として終わる。
+      assistant.failingCalls.add(0);
+
+      await tester.tap(button);
+      await tester.pump();
+
+      expect(assistant.callCount, 1);
+
+      assistant.release(0);
+
+      await tester.pumpAndSettle();
+
+      expect(
+        find.text('今はAIと一緒に考えることができませんでした。自分の言葉で気づきを残すことはできます。'),
+        findsOneWidget,
+      );
+
+      // 失敗しても行き止まりにならず、Humanの操作でもう一度頼める。
+      expect(isButtonEnabled(tester, thinkingButtonKey), isTrue);
+
+      await tester.tap(button);
+      await tester.pump();
+
+      // 増えるのはちょうど1回分。
+      expect(assistant.callCount, 2);
+      expect(assistant.isPending(1), isTrue);
+
+      assistant.results[1] = createSupport(label: 'B');
+      assistant.release(1);
+
+      await tester.pumpAndSettle();
+
+      // 新しい結果だけが残り、前の失敗の知らせは消える。
+      expect(find.text('B の問い'), findsOneWidget);
+      expect(
+        find.text('今はAIと一緒に考えることができませんでした。自分の言葉で気づきを残すことはできます。'),
+        findsNothing,
+      );
+    });
+
+    testWidgets('一度考えたあとでも、Humanが望めばもう一度頼める', (tester) async {
+      final assistant = GatedThinkingAssistant();
+
+      await pumpRecordPage(
+        tester,
+        repository: InMemoryInsightRepository(),
+        assistant: assistant,
+      );
+
+      final button = find.byKey(thinkingButtonKey);
+
+      await tester.ensureVisible(button);
+      await tester.pumpAndSettle();
+
+      await tester.tap(button);
+      await tester.pump();
+
+      assistant.results[0] = createSupport(label: 'A');
+      assistant.release(0);
+
+      await tester.pumpAndSettle();
+
+      expect(assistant.callCount, 1);
+      expect(find.text('A の問い'), findsOneWidget);
+      expect(find.text('もう一度一緒に考える'), findsOneWidget);
+      expect(isButtonEnabled(tester, thinkingButtonKey), isTrue);
+
+      // 終わったあとの、Humanの明示的な頼み直しは止めない。
+      await tester.tap(button);
+      await tester.pump();
+
+      expect(assistant.callCount, 2);
+
+      assistant.results[1] = createSupport(label: 'B');
+      assistant.release(1);
+
+      await tester.pumpAndSettle();
+
+      expect(find.text('B の問い'), findsOneWidget);
+      expect(find.text('A の問い'), findsNothing);
+    });
+
+    testWidgets('考えている間に画面を離れても、あとから壊れない', (tester) async {
+      final repository = InMemoryInsightRepository();
+      final assistant = GatedThinkingAssistant();
+
+      await pumpRecordPage(
+        tester,
+        repository: repository,
+        assistant: assistant,
+      );
+
+      await tester.tap(find.byKey(thinkingButtonKey));
+      await tester.pump();
+
+      expect(assistant.isPending(0), isTrue);
+
+      // 考えている途中でも、Humanは画面を離れられる。
+      await tester.pageBack();
+      await tester.pumpAndSettle();
+
+      expect(find.byType(InsightRecordPage), findsNothing);
+
+      assistant.results[0] = createSupport();
+      assistant.release(0);
+
+      await tester.pumpAndSettle();
+
+      expect(tester.takeException(), isNull);
+
+      // 離れたあとに、勝手に何かが残ることもない。
+      expect(await readEntries(repository), isEmpty);
     });
   });
 }

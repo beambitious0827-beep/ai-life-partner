@@ -5,8 +5,10 @@ import 'package:ai_life_partner/features/calendar/presentation/calendar_page.dar
 import 'package:ai_life_partner/features/calendar/presentation/event_editor_page.dart';
 import 'package:ai_life_partner/features/home/presentation/action_calendar_registration.dart';
 import 'package:ai_life_partner/features/home/presentation/action_journey_record.dart';
+import 'package:ai_life_partner/features/insight/data/demo_reflection_thinking_assistant.dart';
 import 'package:ai_life_partner/features/insight/data/in_memory_insight_repository.dart';
 import 'package:ai_life_partner/features/insight/domain/repositories/insight_repository.dart';
+import 'package:ai_life_partner/features/insight/domain/services/reflection_thinking_assistant.dart';
 import 'package:ai_life_partner/features/insight/presentation/insight_page.dart';
 import 'package:ai_life_partner/features/journey/data/in_memory_journey_repository.dart';
 import 'package:ai_life_partner/features/journey/domain/models/journey_entry.dart';
@@ -33,6 +35,7 @@ class HomePage extends StatefulWidget {
     this.journeyRepository,
     this.reflectionRepository,
     this.insightRepository,
+    this.thinkingAssistant,
   });
 
   final String? displayName;
@@ -53,6 +56,12 @@ class HomePage extends StatefulWidget {
 
   /// 省略した場合は、アプリ内メモリのRepositoryを使用する。
   final InsightRepository? insightRepository;
+
+  /// 省略した場合は、デモのAssistantを使用する。
+  ///
+  /// clientにはAI providerの鍵を置かない。
+  /// 安全なserver側の窓口ができたら、ここへ差し替える。
+  final ReflectionThinkingAssistant? thinkingAssistant;
 
   @override
   State<HomePage> createState() => _HomePageState();
@@ -86,6 +95,10 @@ class _HomePageState extends State<HomePage> {
   /// そのため、画面ごとに作らず、この一つを渡して共有する。
   late final InsightRepository _insightRepository =
       widget.insightRepository ?? InMemoryInsightRepository();
+
+  /// 考えるための材料の取り寄せ先も、画面ごとに作らずここから渡して共有する。
+  late final ReflectionThinkingAssistant _thinkingAssistant =
+      widget.thinkingAssistant ?? const DemoReflectionThinkingAssistant();
 
   /// Humanが最後に確定した次の一歩。
   ///
@@ -309,6 +322,7 @@ class _HomePageState extends State<HomePage> {
           reflectionRepository: _reflectionRepository,
           journeyRepository: _journeyRepository,
           insightRepository: _insightRepository,
+          thinkingAssistant: _thinkingAssistant,
           humanId: _humanId,
         ),
       ),

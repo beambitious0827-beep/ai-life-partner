@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:ai_life_partner/features/insight/data/demo_reflection_thinking_assistant.dart';
 import 'package:ai_life_partner/features/insight/data/in_memory_insight_repository.dart';
 import 'package:ai_life_partner/features/insight/domain/models/insight_entry.dart';
 import 'package:ai_life_partner/features/insight/domain/repositories/insight_repository.dart';
@@ -310,6 +311,7 @@ Future<void> pumpReflectionPage(
         reflectionRepository: reflectionRepository,
         journeyRepository: journeyRepository,
         insightRepository: insightRepository ?? InMemoryInsightRepository(),
+        thinkingAssistant: const DemoReflectionThinkingAssistant(),
         humanId: humanId,
       ),
     ),
