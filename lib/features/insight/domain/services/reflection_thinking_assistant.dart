@@ -17,7 +17,8 @@ import '../models/reflection_thinking_support.dart';
 abstract interface class ReflectionThinkingAssistant {
   /// 渡された材料について、考えるための問い・別の見方・可能性を返す。
   ///
-  /// 失敗した場合は例外を投げてよい。
+  /// 失敗した場合は ReflectionThinkingException を投げる。
+  /// 通信やproviderの事情は、そこで共通の言い方へそろえてある。
   /// AIと一緒に考えられないことは、気づきを残せないことを意味しない。
   Future<ReflectionThinkingSupport> support(ReflectionThinkingRequest request);
 
