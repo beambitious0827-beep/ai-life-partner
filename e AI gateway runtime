@@ -1,0 +1,18 @@
+ .gitignore                                         |  13 [32m+[m
+ docs/08_AiGatewayDesign.md                         |  14 [32m+[m
+ docs/09_SupabaseEdgeRuntimeDesign.md               | 823 [32m+++++++++++++++++++++[m
+ supabase/config.toml                               |  12 [32m+[m
+ supabase/deno.json                                 |  15 [32m+[m
+ supabase/functions/_shared/http.ts                 |  35 [32m+[m
+ supabase/functions/_shared/log.ts                  |  38 [32m+[m
+ supabase/functions/reflection-thinking/contract.ts | 130 [32m++++[m
+ supabase/functions/reflection-thinking/handler.ts  | 208 [32m++++++[m
+ supabase/functions/reflection-thinking/index.ts    |  34 [32m+[m
+ supabase/functions/reflection-thinking/provider.ts |  56 [32m++[m
+ .../functions/tests/reflection-thinking/assert.ts  |  54 [32m++[m
+ .../reflection-thinking/configuration_test.ts      | 109 [32m+++[m
+ .../tests/reflection-thinking/contract_test.ts     | 243 [32m++++++[m
+ .../tests/reflection-thinking/fake_provider.ts     |  52 [32m++[m
+ .../tests/reflection-thinking/handler_test.ts      | 461 [32m++++++++++++[m
+ .../tests/reflection-thinking/provider_test.ts     |  43 [32m++[m
+ 17 files changed, 2340 insertions(+)

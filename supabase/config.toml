@@ -1,0 +1,12 @@
+# Supabase local configuration.
+#
+# project_id はlocal開発でのプロジェクト名として使う。
+# remote projectはまだ作っていないため、project-refはここに書かない。
+# link / deploy / secret set も行っていない。
+project_id = "ai-life-partner"
+
+# reflection-thinking はサインインしたHuman専用の窓口である。
+# publicなendpointではないので、JWTの検証を明示して有効にする。
+# 既定がtrueだからという理由で省略しない。falseにもしない。
+[functions.reflection-thinking]
+verify_jwt = true

@@ -43,3 +43,16 @@ app.*.map.json
 /android/app/debug
 /android/app/profile
 /android/app/release
+
+# Supabase related
+# supabase/functions/ と supabase/config.toml はソースなので無視しない。
+# 無視するのは、ローカル作業の副産物とsecretだけ。
+supabase/.branches/
+supabase/.temp/
+
+# local secret。Edge Functionsは supabase/functions/.env を読むため、
+# そこも必ず含める。**/supabase/.env* だけでは届かない。
+**/supabase/.env
+**/supabase/.env.*
+supabase/functions/.env
+supabase/functions/.env.*

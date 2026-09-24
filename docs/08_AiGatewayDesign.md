@@ -83,6 +83,14 @@ HTTP client dependencyも存在しない。
 
 未実装のものを、実装済みのように見せる仕組みは置かない。
 
+> Phase 11 で、この境界の向こう側に Supabase Edge Function を置いた。
+>
+> 認証と取り決めの確認はそこで実装済みである。認可・rate limit・
+> Provider接続は未実装のまま残っている。
+>
+> 本章は Phase 10 時点の判断として残す。server側の現状は
+> `docs/09_SupabaseEdgeRuntimeDesign.md` を見る。
+
 ---
 
 # 4. Provider Secret
@@ -108,6 +116,12 @@ Flutterはprovider APIを直接呼ばない。呼び先はserver側の窓口だ�
 ```
 POST /v1/ai/reflection-thinking
 ```
+
+> 上の経路は境界を説明するための書き方である。
+>
+> Phase 11 で置いた実際の経路は
+> `https://<project-ref>.supabase.co/functions/v1/reflection-thinking` であり、
+> `docs/09_SupabaseEdgeRuntimeDesign.md` 4章が正しい。
 
 Request：
 
