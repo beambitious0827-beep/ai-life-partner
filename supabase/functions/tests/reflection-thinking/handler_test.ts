@@ -9,6 +9,10 @@ import {
   ProviderUnavailableError,
   UnconfiguredAiThinkingProvider,
 } from "../../reflection-thinking/provider.ts";
+import {
+  MAX_REFLECTION_TEXT_LENGTH,
+  MAX_REQUEST_BODY_BYTES,
+} from "../../_shared/limits.ts";
 import { defaultResult, FakeAiThinkingProvider } from "./fake_provider.ts";
 import { assert, assertEquals, assertStringNotIncludes } from "./assert.ts";
 
@@ -458,4 +462,287 @@ Deno.test("つながっていない場合の失敗は、種類を見分けて返
   const body = await response.json();
 
   assertEquals(body.error.code, "provider_unavailable");
+});
+
+// ---------------------------------------------------------------------------
+// bodyの大きさ。
+//
+// 数えるのはUTF-8のbyte数。項目の長さ（UTF-16 code unit）とは別の話である。
+// ---------------------------------------------------------------------------
+
+/** 指定したbyte数ちょうどの、正しいJSONを作る。 */
+function jsonOfBytes(totalBytes: number, marker = "a"): string {
+  const envelope = '{"note":""}';
+  const padding = totalBytes - envelope.length - marker.length;
+
+  assert(padding >= 0, "作れない大きさを頼まれている");
+
+  const body = `{"note":"${marker}${"a".repeat(padding)}"}`;
+
+  assertEquals(
+    new TextEncoder().encode(body).byteLength,
+    totalBytes,
+    "狙ったbyte数になっていない",
+  );
+
+  return body;
+}
+
+function createRawRequest(
+  body: string | ReadableStream<Uint8Array>,
+  contentLength?: string,
+): Request {
+  const headers = new Headers({
+    "content-type": "application/json",
+    "authorization": "Bearer test-token-value",
+  });
+
+  if (contentLength !== undefined) {
+    headers.set("content-length", contentLength);
+  }
+
+  return new Request("https://example.test/functions/v1/reflection-thinking", {
+    method: "POST",
+    headers,
+    body,
+  });
+}
+
+function streamOf(text: string, chunkBytes = 1024): ReadableStream<Uint8Array> {
+  const bytes = new TextEncoder().encode(text);
+
+  return new ReadableStream<Uint8Array>({
+    start(controller) {
+      for (let offset = 0; offset < bytes.byteLength; offset += chunkBytes) {
+        controller.enqueue(bytes.slice(offset, offset + chunkBytes));
+      }
+
+      controller.close();
+    },
+  });
+}
+
+Deno.test("上限ちょうどのbodyは、これまでどおり取り決めで判断する", async () => {
+  const provider = new FakeAiThinkingProvider();
+
+  // 32768 bytesちょうど。大きさでは断らない。
+  // 中身は取り決めに合わないので、400で返る。413ではない。
+  const response = await handleReflectionThinking(
+    createRawRequest(jsonOfBytes(MAX_REQUEST_BODY_BYTES)),
+    { provider },
+  );
+
+  assertEquals(response.status, 400);
+
+  const body = await response.json();
+
+  assertEquals(body.error.code, "invalid_request");
+  assertEquals(provider.callCount, 0);
+});
+
+Deno.test("上限を超えたbodyは413で断る", async () => {
+  const provider = new FakeAiThinkingProvider();
+
+  const response = await handleReflectionThinking(
+    createRawRequest(jsonOfBytes(MAX_REQUEST_BODY_BYTES + 1)),
+    { provider },
+  );
+
+  assertEquals(response.status, 413);
+
+  const body = await response.json();
+
+  assertEquals(body.error.code, "payload_too_large");
+  assertEquals(body.contractVersion, CONTRACT_VERSION);
+  // 大きすぎたbodyを、追跡IDのために読み直さない。
+  assertEquals(body.requestId, null);
+  assertEquals(Object.keys(body.error), ["code"]);
+  assertEquals(provider.callCount, 0);
+});
+
+Deno.test("申告だけが上限を超えていても413で断る", async () => {
+  const provider = new FakeAiThinkingProvider();
+
+  const response = await handleReflectionThinking(
+    createRawRequest(
+      JSON.stringify(validBody()),
+      String(MAX_REQUEST_BODY_BYTES + 1),
+    ),
+    { provider },
+  );
+
+  assertEquals(response.status, 413);
+
+  const body = await response.json();
+
+  assertEquals(body.error.code, "payload_too_large");
+  assertEquals(provider.callCount, 0);
+});
+
+Deno.test("申告が無い、または嘘でも、実際の大きさで413になる", async () => {
+  const oversized = jsonOfBytes(MAX_REQUEST_BODY_BYTES + 100);
+
+  for (const contentLength of [undefined, "10", "abc", "-1"]) {
+    const provider = new FakeAiThinkingProvider();
+
+    const response = await handleReflectionThinking(
+      createRawRequest(streamOf(oversized), contentLength),
+      { provider },
+    );
+
+    assertEquals(response.status, 413, `content-length: ${contentLength}`);
+
+    const body = await response.json();
+
+    assertEquals(body.error.code, "payload_too_large");
+    assertEquals(provider.callCount, 0);
+  }
+});
+
+Deno.test("上限以内の読めないJSONは、これまでどおり400 invalid_json", async () => {
+  const provider = new FakeAiThinkingProvider();
+
+  const response = await handleReflectionThinking(
+    createRawRequest("{ this is not json"),
+    { provider },
+  );
+
+  // 「大きすぎた」と「読めなかった」を混ぜない。
+  assertEquals(response.status, 400);
+
+  const body = await response.json();
+
+  assertEquals(body.error.code, "invalid_json");
+  assertEquals(body.requestId, null);
+  assertEquals(provider.callCount, 0);
+});
+
+Deno.test("大きすぎたbodyの中身は、応答へ出さない", async () => {
+  const provider = new FakeAiThinkingProvider();
+
+  const oversized = jsonOfBytes(
+    MAX_REQUEST_BODY_BYTES + 100,
+    PRIVATE_REFLECTION_MARKER,
+  );
+
+  const response = await handleReflectionThinking(
+    createRawRequest(streamOf(oversized)),
+    { provider },
+  );
+
+  assertEquals(response.status, 413);
+
+  const text = await response.text();
+
+  assertStringNotIncludes(text, PRIVATE_REFLECTION_MARKER);
+  // 大きさそのものも応答へ出さない。
+  assertStringNotIncludes(text, String(MAX_REQUEST_BODY_BYTES));
+  assertStringNotIncludes(text, "byte");
+});
+
+Deno.test("大きすぎたbodyの中身は、ログへも出さない", async () => {
+  const sink = createLogSink();
+  const provider = new FakeAiThinkingProvider();
+
+  const oversized = jsonOfBytes(
+    MAX_REQUEST_BODY_BYTES + 100,
+    PRIVATE_REFLECTION_MARKER,
+  );
+
+  const response = await handleReflectionThinking(
+    createRawRequest(streamOf(oversized)),
+    { provider, now: () => 0, log: sink.log },
+  );
+
+  assertEquals(response.status, 413);
+  await response.body?.cancel();
+
+  assertEquals(sink.lines.length, 1);
+
+  const line = sink.lines[0];
+
+  assertStringNotIncludes(line, PRIVATE_REFLECTION_MARKER);
+  assertStringNotIncludes(line, "Bearer");
+  assertStringNotIncludes(line, "test-token-value");
+
+  const logged = JSON.parse(line);
+
+  // 残すのはこれまでと同じ項目だけ。大きさの情報を足さない。
+  assertEquals(Object.keys(logged).sort(), [
+    "durationMs",
+    "fn",
+    "outcome",
+    "requestId",
+    "status",
+  ]);
+  assertEquals(logged.outcome, "payload_too_large");
+  assertEquals(logged.status, 413);
+  assertEquals(logged.requestId, null);
+});
+
+Deno.test("POST以外では、大きすぎるbodyでもbodyを読まない", async () => {
+  const provider = new FakeAiThinkingProvider();
+
+  const oversized = jsonOfBytes(MAX_REQUEST_BODY_BYTES + 100);
+
+  for (const method of ["PUT", "PATCH", "DELETE"]) {
+    const request = new Request(
+      "https://example.test/functions/v1/reflection-thinking",
+      {
+        method,
+        headers: { "content-type": "application/json" },
+        body: oversized,
+      },
+    );
+
+    const response = await handleReflectionThinking(request, { provider });
+
+    // 大きさを見る前に断る。413ではなく405のまま。
+    assertEquals(response.status, 405);
+    await response.body?.cancel();
+
+    // bodyへ手をつけていない。
+    assertEquals(request.bodyUsed, false);
+  }
+});
+
+Deno.test("項目が長すぎる場合は400で断る。413にはしない", async () => {
+  const provider = new FakeAiThinkingProvider();
+
+  // body全体は上限のはるか下。長すぎるのは項目のほう。
+  const response = await handleReflectionThinking(
+    createRequest({
+      ...validBody(),
+      reflection: {
+        feelingText: "あ".repeat(MAX_REFLECTION_TEXT_LENGTH + 1),
+        noticedText: null,
+      },
+    }),
+    { provider },
+  );
+
+  assertEquals(response.status, 400);
+
+  const body = await response.json();
+
+  assertEquals(body.error.code, "invalid_request");
+  assertEquals(body.requestId, "thinking-1");
+  assertEquals(provider.callCount, 0);
+});
+
+Deno.test("形の合わない追跡IDは400で断る", async () => {
+  const provider = new FakeAiThinkingProvider();
+
+  const response = await handleReflectionThinking(
+    createRequest({ ...validBody(), requestId: "thinking 1" }),
+    { provider },
+  );
+
+  assertEquals(response.status, 400);
+
+  const body = await response.json();
+
+  assertEquals(body.error.code, "invalid_request");
+  assertEquals(body.requestId, null);
+  assertEquals(provider.callCount, 0);
 });

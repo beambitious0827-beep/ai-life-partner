@@ -8,7 +8,18 @@
  * 受け取るのは、Humanが選んだ振り返りの言葉だけである。
  * humanId / provider / model / systemPrompt / Journey / Calendar などは
  * 受け取らないし、余分な項目があっても内部へは流さない。
+ *
+ * 大きさも確かめる。
+ * 各項目の長さは **UTF-16 code unit**（JavaScriptの `String.length`）で数える。
+ * body全体のbyte数とは数え方が違う。そちらは `_shared/limited_json.ts` が見る。
  */
+
+import {
+  MAX_REFLECTION_ENTRY_ID_LENGTH,
+  MAX_REFLECTION_TEXT_LENGTH,
+  MAX_REQUEST_ID_LENGTH,
+  REQUEST_ID_PATTERN,
+} from "../_shared/limits.ts";
 
 /** やり取りの版。増やすときはFlutter側と合わせる。 */
 export const CONTRACT_VERSION = "v1";
@@ -64,6 +75,9 @@ function trimmedOrNull(value: unknown): string | null {
  *
  * clientが正しく送ってくる前提を置かない。
  * 取り決めどおりのものだけを、この先へ通す。
+ *
+ * 長さは **trimする前の生の値** で数える。
+ * 空白だけの巨大な文字列を、trimして短いものとして扱わない。
  */
 export function parseThinkingRequest(raw: unknown): ParseResult {
   if (!isPlainObject(raw)) {
@@ -71,11 +85,26 @@ export function parseThinkingRequest(raw: unknown): ParseResult {
   }
 
   // 追跡IDは、あとの応答でも使うので先に取り出す。
-  const requestId = trimmedOrNull(raw.requestId);
+  const rawRequestId = raw.requestId;
 
-  if (requestId === null) {
+  if (typeof rawRequestId !== "string") {
     return { ok: false, code: "invalid_request", requestId: null };
   }
+
+  // 長さは、空白を落とす前の生の値で数える。
+  if (rawRequestId.length > MAX_REQUEST_ID_LENGTH) {
+    return { ok: false, code: "invalid_request", requestId: null };
+  }
+
+  // 形も、そのままの値へ当てる。
+  // 空白を落としてから確かめると、空白を含むIDが通ってしまう。
+  // ここを通ったIDは、応答とログにそのまま載る値でもある。
+  if (!REQUEST_ID_PATTERN.test(rawRequestId)) {
+    return { ok: false, code: "invalid_request", requestId: null };
+  }
+
+  // ここを通った時点で、空白も制御文字も含まない。trimは要らない。
+  const requestId = rawRequestId;
 
   const contractVersion = raw.contractVersion;
 
@@ -87,7 +116,18 @@ export function parseThinkingRequest(raw: unknown): ParseResult {
     return { ok: false, code: "unsupported_contract", requestId };
   }
 
-  const reflectionEntryId = trimmedOrNull(raw.reflectionEntryId);
+  const rawReflectionEntryId = raw.reflectionEntryId;
+
+  if (typeof rawReflectionEntryId !== "string") {
+    return { ok: false, code: "invalid_request", requestId };
+  }
+
+  if (rawReflectionEntryId.length > MAX_REFLECTION_ENTRY_ID_LENGTH) {
+    return { ok: false, code: "invalid_request", requestId };
+  }
+
+  // 形の制限はまだ加えない。空でないことだけを、これまでどおり確かめる。
+  const reflectionEntryId = trimmedOrNull(rawReflectionEntryId);
 
   if (reflectionEntryId === null) {
     return { ok: false, code: "invalid_request", requestId };
@@ -109,6 +149,15 @@ export function parseThinkingRequest(raw: unknown): ParseResult {
     return { ok: false, code: "invalid_request", requestId };
   }
 
+  // 長さはtrimの前に見る。空白だけの4001文字も、ここで断る。
+  if (!withinTextLimit(reflection.feelingText)) {
+    return { ok: false, code: "invalid_request", requestId };
+  }
+
+  if (!withinTextLimit(reflection.noticedText)) {
+    return { ok: false, code: "invalid_request", requestId };
+  }
+
   // clientがtrimしている前提を置かない。ここで整えてから先へ渡す。
   const feelingText = trimmedOrNull(reflection.feelingText);
   const noticedText = trimmedOrNull(reflection.noticedText);
@@ -127,4 +176,17 @@ export function parseThinkingRequest(raw: unknown): ParseResult {
 
 function isOptionalText(value: unknown): boolean {
   return value === undefined || value === null || typeof value === "string";
+}
+
+/**
+ * 振り返りの言葉の長さを確かめる。
+ *
+ * 数えるのはUTF-16 code unit。書かれていない項目は、長さを持たない。
+ */
+function withinTextLimit(value: unknown): boolean {
+  if (typeof value !== "string") {
+    return true;
+  }
+
+  return value.length <= MAX_REFLECTION_TEXT_LENGTH;
 }

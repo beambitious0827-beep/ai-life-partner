@@ -64,6 +64,8 @@ Deno.test("受け取った内容を、そのままログへ出す書き方をし
     "functions/reflection-thinking/contract.ts",
     "functions/reflection-thinking/provider.ts",
     "functions/_shared/http.ts",
+    "functions/_shared/limited_json.ts",
+    "functions/_shared/limits.ts",
     "functions/_shared/log.ts",
   ];
 
@@ -77,6 +79,9 @@ Deno.test("受け取った内容を、そのままログへ出す書き方をし
     "console.log(noticedText",
     "console.error(",
     "JSON.stringify(req",
+    // bodyの一部を持ち出す書き方も置かない。
+    ".slice(0, 100)",
+    "preview",
   ];
 
   for (const path of sources) {
@@ -95,6 +100,8 @@ Deno.test("sourceにsecretらしき値を置いていない", () => {
     "functions/reflection-thinking/handler.ts",
     "functions/reflection-thinking/provider.ts",
     "functions/_shared/http.ts",
+    "functions/_shared/limited_json.ts",
+    "functions/_shared/limits.ts",
     "functions/_shared/log.ts",
   ];
 
@@ -105,5 +112,70 @@ Deno.test("sourceにsecretらしき値を置いていない", () => {
     assertStringNotIncludes(source, "OPENAI_API_KEY", `${path}`);
     assertStringNotIncludes(source, "ANTHROPIC_API_KEY", `${path}`);
     assertStringNotIncludes(source, "SUPABASE_SECRET_KEY", `${path}`);
+  }
+});
+
+Deno.test("handlerがbodyを無制限に展開していない", () => {
+  // 説明のために名前を書くことはある。見たいのは実際に呼んでいるかどうかなので、
+  // 注釈の行は除いてから確かめる。
+  const code = readRepoFile("functions/reflection-thinking/handler.ts")
+    .split("\n")
+    .filter((line) => {
+      const trimmed = line.trim();
+
+      return !trimmed.startsWith("//") && !trimmed.startsWith("*") &&
+        !trimmed.startsWith("/*");
+    })
+    .join("\n");
+
+  // `req.json()` はbodyを最後まで読んでから展開する。
+  // 上限を設けたあとで、これが戻ってきていないことを見張る。
+  for (
+    const forbidden of [
+      "req.json()",
+      "req.text()",
+      "req.arrayBuffer()",
+      "req.blob()",
+      "req.formData()",
+    ]
+  ) {
+    assertStringNotIncludes(code, forbidden, "上限なしの読み取りが戻っている");
+  }
+
+  assert(code.includes("readLimitedJson"), "上限つきの読み取りを通している");
+});
+
+Deno.test("上限の値は、1か所にまとめてある", () => {
+  const limits = readRepoFile("functions/_shared/limits.ts");
+
+  for (
+    const name of [
+      "MAX_REQUEST_BODY_BYTES",
+      "MAX_REQUEST_ID_LENGTH",
+      "REQUEST_ID_PATTERN",
+      "MAX_REFLECTION_ENTRY_ID_LENGTH",
+      "MAX_REFLECTION_TEXT_LENGTH",
+    ]
+  ) {
+    assert(limits.includes(`export const ${name}`), `${name} がある`);
+  }
+
+  // 使う側は、数字を書き写さずにここから読む。
+  for (
+    const path of [
+      "functions/reflection-thinking/contract.ts",
+      "functions/_shared/limited_json.ts",
+    ]
+  ) {
+    const source = readRepoFile(path);
+
+    assert(
+      source.includes('from "../_shared/limits.ts"') ||
+        source.includes('from "./limits.ts"'),
+      `${path} は上限をlimits.tsから読む`,
+    );
+    assertStringNotIncludes(source, "32768", `${path} に数字が写されている`);
+    assertStringNotIncludes(source, "4000", `${path} に数字が写されている`);
+    assertStringNotIncludes(source, "128", `${path} に数字が写されている`);
   }
 });

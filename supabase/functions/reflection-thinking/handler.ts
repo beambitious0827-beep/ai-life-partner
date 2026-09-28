@@ -11,6 +11,7 @@
  */
 
 import { errorResponse, jsonResponse } from "../_shared/http.ts";
+import { readLimitedJson } from "../_shared/limited_json.ts";
 import { formatThinkingLogEvent } from "../_shared/log.ts";
 import { CONTRACT_VERSION, parseThinkingRequest } from "./contract.ts";
 import {
@@ -114,11 +115,25 @@ export async function handleReflectionThinking(
     );
   }
 
-  let body: unknown;
+  // bodyは決めた大きさまでしか読まない。
+  // `req.json()` を直接呼ばないのは、読み切ってからでは遅いためである。
+  const read = await readLimitedJson(req);
 
-  try {
-    body = await req.json();
-  } catch {
+  if (!read.ok) {
+    if (read.reason === "payload_too_large") {
+      // 大きすぎたbodyを、追跡IDを取り出すために読み直さない。
+      // requestIdはnullのまま返す。中身も、その一部も、応答へ出さない。
+      return finish(
+        errorResponse(413, {
+          code: "payload_too_large",
+          requestId: null,
+          contractVersion: CONTRACT_VERSION,
+        }),
+        "payload_too_large",
+        null,
+      );
+    }
+
     // 読めなかった中身は、ログにも応答にも載せない。
     return finish(
       errorResponse(400, {
@@ -131,7 +146,7 @@ export async function handleReflectionThinking(
     );
   }
 
-  const parsed = parseThinkingRequest(body);
+  const parsed = parseThinkingRequest(read.value);
 
   if (!parsed.ok) {
     return finish(

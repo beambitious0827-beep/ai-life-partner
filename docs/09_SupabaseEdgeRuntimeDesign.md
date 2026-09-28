@@ -37,6 +37,7 @@ AIとHumanの関わり方（AI出力はInsightではない、Humanが確定す�
 - 未設定であることをはっきり返すProvider
 - Providerが返した材料の確認
 - statusと失敗の言い方の統一
+- 入力の大きさの上限（body全体・各項目）
 - ログの決まりごと
 - Deno のテスト
 
@@ -46,7 +47,6 @@ AIとHumanの関わり方（AI出力はInsightではない、Humanが確定す�
 - provider secretの受け渡し
 - Flutter ↔ Edge Function の実通信
 - Reflectionの保存と、その所有権の確認
-- 入力の大きさの上限
 - rate limit
 - 課金・利用量の管理
 - idempotency / 重複の検出
@@ -66,8 +66,10 @@ supabase/
 ├── deno.json
 └── functions/
     ├── _shared/
-    │   ├── http.ts        応答の組み立て
-    │   └── log.ts         ログ1行の組み立て
+    │   ├── http.ts           応答の組み立て
+    │   ├── limits.ts         受け取ってよい大きさの上限
+    │   ├── limited_json.ts   上限まで読んでJSONにする
+    │   └── log.ts            ログ1行の組み立て
     ├── reflection-thinking/
     │   ├── index.ts       配線だけ（ここだけがnpm:を読む）
     │   ├── contract.ts    受け取る内容の取り決めと確認
@@ -79,6 +81,7 @@ supabase/
             ├── fake_provider.ts
             ├── contract_test.ts
             ├── handler_test.ts
+            ├── limited_json_test.ts
             ├── provider_test.ts
             └── configuration_test.ts
 ```
@@ -234,6 +237,7 @@ HTTPのbodyは信用できない入力なので、server側で独立に確かめ
 - `reflection` が入れ物の形であること
 - `feelingText` / `noticedText` が文字列またはnullであること
 - 少なくともどちらかが空でないこと
+- どの項目も、決めた長さを超えていないこと（7.2）
 
 空白だけの値は、書かれていないものとして扱う。
 
@@ -250,6 +254,112 @@ bodyに知らない項目があっても読まないので、AIの材料には�
 版が違う場合（`"v2"` など）は当てずっぽうで解釈せず、
 
 `unsupported_contract` として断る。
+
+## 7.2 Input Size Protection
+
+大きさの確認は2層に分かれている。**数え方が違うので、混ぜない。**
+
+| 層 | 何を数えるか | どこで |
+| --- | --- | --- |
+| body全体 | **UTF-8のbyte数** | `_shared/limited_json.ts` |
+| 各項目 | **UTF-16 code unit**（JavaScriptの `String.length`） | `contract.ts` |
+
+上限は `_shared/limits.ts` の1か所に置く。実装もテストもここを読む。
+
+### body全体
+
+| | 値 |
+| --- | --- |
+| `MAX_REQUEST_BODY_BYTES` | **32768**（32 KiB） |
+
+`req.json()` は呼ばない。bodyを最後まで読んでからでは、
+
+上限を超えたと分かるのが遅すぎるためである。
+
+`readLimitedJson` が、bodyのstreamを読みながらbyte数を数え、
+
+**上限を超えた時点で読むのをやめる**。上限ちょうどは通す。
+
+### Content-Length の扱い
+
+`Content-Length` の扱いは、申告がどう読めるかで3つに分かれる。
+
+| 申告 | 扱い |
+| --- | --- |
+| 正しい非負整数で、**上限を超えている** | bodyを読まずに、その場で `413` |
+| 正しい非負整数で、**上限以下** | これだけでは安全と見なさず、実際のbyte数を数える |
+| header が無い／正しい非負整数として読めない | 大きさの判断に使わず、実際のbyte数だけで決める |
+
+「正しい非負整数として読めない」とは、負の値・小数・指数表記・複数値など、
+
+`^\d+$` に合わないもの全部である。これらは無かったものとして扱う。
+
+**上限超過の申告は、早い断りに使う。**
+
+実際のbodyが小さいかどうかは確かめない。読み始めること自体をやめる。
+
+申告を信じて断るのではなく、「その大きさを送るつもりだ」という申告を
+
+受け取らない、ということである。
+
+**それ以外では、`Content-Length` だけを信用しない。**
+
+上限以下の申告も、読めない申告も、header の不在も、同じように扱う。
+
+**実際に届いたbyte数の数えが、過小申告とheader不在を防ぐ境目である。**
+
+clientが実際より小さく申告しても、header を付けずに送ってきても、
+
+この数えがあるかぎり上限を越えられない。
+
+### 各項目
+
+| 項目 | 上限 | 形 |
+| --- | --- | --- |
+| `requestId` | 64 | `^[A-Za-z0-9_-]{1,64}$` |
+| `reflectionEntryId` | 128 | 制限しない（7.3） |
+| `feelingText` | 4000 | — |
+| `noticedText` | 4000 | — |
+
+数えるのは **UTF-16 code unit** である。字の見た目の数ではない。
+
+絵文字ひとつは `length` が2になる。この定義をgrapheme数へ読み替えない。
+
+Flutter側も、つなぐときに同じ数え方へそろえる。
+
+### 数える順番
+
+```
+型を確かめる
+  ↓
+trimする前の生の長さを確かめる
+  ↓
+trimする
+  ↓
+これまでどおり、空でないことを確かめる
+```
+
+**長さを見るのはtrimの前**である。あとで見ると、
+
+空白だけの4001文字が、trimされて0文字として通ってしまう。
+
+### requestId の形
+
+形は、空白を落とす前のそのままの値へ当てる。
+
+落としてから確かめると、空白を含むIDが通ってしまうためである。
+
+ここを通ったIDは、応答とログへそのまま載る値でもある。
+
+Flutter側が作る `thinking-<micros>-<seq>` は、この形にも長さにも収まる。
+
+## 7.3 What is Not Restricted Yet
+
+`reflectionEntryId` の**形**は、Phase 12では制限しない。
+
+clientが作るIDの形がまだ定まっていないためである。
+
+長さと、空でないことだけを確かめる。
 
 ---
 
@@ -338,16 +448,23 @@ compile-timeの型がどうであれ、runtimeでは何が返るかわからな�
 | --- | --- | --- |
 | 200 | — | 材料を返せた |
 | 400 | `invalid_json` | bodyがJSONとして読めない |
-| 400 | `invalid_request` | 取り決めに合わない |
+| 400 | `invalid_request` | 取り決めに合わない（項目が長すぎる場合を含む） |
 | 400 | `unsupported_contract` | 読めない版 |
 | 401 | — | 認証を通らない（wrapperが返す） |
 | 405 | `method_not_allowed` | POST以外 |
+| 413 | `payload_too_large` | request bodyが許容サイズを超えた |
 | 429 | `rate_limited` | **未実装**。将来のrate limit用に空けてある |
 | 500 | `internal_error` | server側の想定外の失敗 |
 | 502 | `invalid_provider_response` | Providerの返事が取り決めに合わない |
 | 503 | `provider_unavailable` | Providerが未設定、または使えない |
 
 401 はhandlerの手前で決まる。handlerは401を組み立てない。
+
+413 と 400 を混ぜない。
+
+**body全体が大きすぎた**のが413、**項目が長すぎた**のが400である。
+
+前者はJSONにする前、後者は取り決めを見る中で分かる。
 
 429 は今回返さない。表に載せてあるのは、あとで意味を変えないためである。
 
@@ -381,9 +498,22 @@ compile-timeの型がどうであれ、runtimeでは何が返るかわからな�
 
 `requestId` が取り出せなかった場合だけ `null` になる。
 
+`payload_too_large` は必ず `null` になる。
+
+大きすぎたbodyを、追跡IDを取り出すために読み直すことはしないためである。
+
+```json
+{
+  "requestId": null,
+  "contractVersion": "v1",
+  "error": { "code": "payload_too_large" }
+}
+```
+
 応答に入れないもの：
 
 - `feelingText` / `noticedText`（成功でも失敗でも返さない）
+- 大きすぎたbodyの中身、その先頭の数文字、実際の大きさ
 - stack trace
 - providerの生のエラー文
 - secret
@@ -415,7 +545,14 @@ client側が決める。serverはHumanへの文章を作らない。
 - 生成された材料の本文
 - Authorization header / JWT
 - request payload全文
+- 大きすぎたbodyの中身、その先頭の数文字、実際の大きさ
 - provider secret
+
+body が大きすぎた場合も、残す項目はこれまでと同じである。
+
+`outcome` が `payload_too_large`、`status` が413になるだけで、
+
+大きさの情報も、中身の一部も足さない。
 
 書かない：
 
@@ -462,7 +599,8 @@ Flutterリポジトリには置かない。
 
 | ファイル | 確かめていること |
 | --- | --- |
-| `contract_test.ts` | 取り決めの受け入れ／拒否、trim、余分な項目が内部へ入らないこと |
+| `contract_test.ts` | 取り決めの受け入れ／拒否、trim、各項目の長さと形、余分な項目が内部へ入らないこと |
+| `limited_json_test.ts` | bodyのbyte数の境目、`Content-Length` が上限超過／上限以下／無い／嘘／壊れている場合、読み切らずに止めること |
 | `handler_test.ts` | methodの扱い、status、Providerへ渡る材料、Providerの不正な返事（root不正を含む）、応答とログに本文が出ないこと |
 | `provider_test.ts` | 未設定のProviderが材料を作らずに失敗すること |
 | `configuration_test.ts` | 設定の書き換わり検知（後述） |
@@ -471,9 +609,15 @@ Flutterリポジトリには置かない。
 
 その目印が **成功の応答にも、失敗の応答にも、ログにも** 現れないことを確かめる。
 
+大きすぎたbodyについても、同じ目印で同じことを確かめる。
+
 Providerへ渡った材料についても、キーが
 
 `feelingText` / `noticedText` の2つだけであることを確かめる。
+
+`limited_json_test.ts` は、終わらないstreamを流して、
+
+**上限を超えた時点で読むのをやめている**ことを、流れたかたまりの数で確かめる。
 
 ネットワークにつながるテストは書かない。
 
@@ -549,9 +693,11 @@ Providerへはまだつないでいない。
 
 secretが無いままdeployして、無いままの振る舞いを確かめる。
 
-ただし、このdeployより前に**入力の大きさの上限**を決めておく（17.1）。
+ただし、このdeployより前に**入力の大きさの上限**が要る（17.1）。
 
 Providerへつないでいなくても、deployした瞬間から外に開くためである。
+
+これはPhase 12 Step 12.1 で実装済みであり、このGateは開いている。
 
 1. remote projectを作る
 2. `supabase link`
@@ -613,17 +759,18 @@ Flutterからこの窓口へ実際につなぐのは、次のPhaseの仕事で�
 この窓口が本番で満たすべき順番。
 
 ```
-1. 認証         … 実装済み（withSupabase / verify_jwt）
-2. 取り決めの確認 … 実装済み
-3. 認可         … 未実装（Reflectionの保存先が必要）
-4. rate limit   … 未実装
-5. 利用量の管理   … 未実装
-6. Provider接続  … 未実装
+1. 認証           … 実装済み（withSupabase / verify_jwt）
+2. 取り決めの確認   … 実装済み
+3. 入力の大きさの上限 … 実装済み（Phase 12 Step 12.1）
+4. 認可           … 未実装（Reflectionの保存先が必要）
+5. rate limit     … 未実装
+6. 利用量の管理     … 未実装
+7. Provider接続    … 未実装
 ```
 
 上から順に積む。
 
-3を飛ばして6を先に行わない。
+4を飛ばして7を先に行わない。
 
 残っている要件には、**いつまでに必要か** という境目がある。
 
@@ -632,25 +779,25 @@ Flutterからこの窓口へ実際につなぐのは、次のPhaseの仕事で�
 ここで3つのGateに分けて書いておく。
 
 ```
-入力の大きさの上限          … 17.1（最初のdeployより前）
+入力の大きさの上限          … 17.1（最初のdeployより前）→ **実装済み**
        ↓
-Runtime Verification Deploy … 15.1
+Runtime Verification Deploy … 15.1（未実施）
        ↓
-401 / 503 / OPTIONS / CORS の確認 … 17.2（deployしたあと、公開の前）
+401 / 503 / OPTIONS / CORS の確認 … 17.2（deployしたあと、公開の前）→ 未確認
        ↓
 公開運用
        ↓
 認可・rate limit・利用量・idempotency・
-provider timeout・secret・prompt管理  … 17.3（実Providerより前）
+provider timeout・secret・prompt管理  … 17.3（実Providerより前）→ 未実装
        ↓
 実Provider接続
 ```
 
-どれも今回は実装しない。実装しないことを、ここに残す。
+17.1 はPhase 12 Step 12.1 で満たした。残る2つのGateはまだ開いていない。
 
 確かめる順番が守れるように、Gateも確かめる順番で並べてある。
 
-## 17.1 Required Before Runtime Verification Deploy
+## 17.1 Required Before Runtime Verification Deploy — 実装済み
 
 **hosted runtimeへ最初にdeployするより前に**満たす必要があるもの。
 
@@ -658,27 +805,35 @@ provider timeout・secret・prompt管理  … 17.3（実Providerより前）
 
 Providerへつないでいなくても、deployした瞬間から外に開く。
 
-### 入力の大きさの上限
+### 入力の大きさの上限 — 実装済み（Phase 12 Step 12.1）
 
-現在、受け取る内容に長さの上限がない。
+決めた値は次のとおり。中身は7.2に書いてある。
 
-取り決めの形だけを確かめており、大きさは確かめていない。
+| 対象 | 上限 | 数え方 |
+| --- | --- | --- |
+| request body全体 | **32768 bytes**（32 KiB） | UTF-8のbyte数 |
+| `requestId` | **64** ＋ 形 `^[A-Za-z0-9_-]{1,64}$` | UTF-16 code unit |
+| `reflectionEntryId` | **128**（形の制限はまだ無い） | UTF-16 code unit |
+| `feelingText` | **4000** | UTF-16 code unit |
+| `noticedText` | **4000** | UTF-16 code unit |
 
-最初のdeployより前に次を決める。
+上限は `_shared/limits.ts` の1か所にある。
 
-- request bodyそのものの大きさの上限
-- `requestId` の最大長と、形式の制限
-- `reflectionEntryId` の最大長
-- `feelingText` の最大長
-- `noticedText` の最大長
+body全体は `readLimitedJson` が、JSONにする前に、読みながら数えて打ち切る。
 
-上限を超えたものは、Providerへ渡す前に断る。
+上限を超えた `Content-Length` はその場で断り、
 
-Providerへつなぐ前であっても、CPU時間とメモリは有限である。
+それ以外は実際に届いたbyte数で決める（7.2）。
 
-`UnconfiguredAiThinkingProvider` のままでも、
+各項目は `contract.ts` が、**trimする前の生の長さ**で確かめる。
 
-大きなbodyを読むこと自体に費用がかかる。
+上限を超えたbodyは `413` / `payload_too_large`、
+
+長すぎる項目は `400` / `invalid_request` として断る。
+
+どちらもProviderへ渡る前に止まる。
+
+このGateは満たした。deployそのものはまだ行っていない（15章）。
 
 ## 17.2 Required After Runtime Verification Deploy, Before Public Operation
 
