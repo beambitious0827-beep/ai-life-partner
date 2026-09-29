@@ -61,10 +61,34 @@ class ServerReflectionThinkingAssistant implements ReflectionThinkingAssistant {
   Future<ReflectionThinkingSupport> support(
     ReflectionThinkingRequest request,
   ) async {
-    final gatewayRequest = AiThinkingGatewayRequest.fromThinkingRequest(
-      request,
-      requestId: _requestIdFactory(),
-    );
+    // 追跡IDを作るのは、組み立ての確認とは別の仕事である。
+    // ここで作っておき、tryの中では確認だけを行う。
+    // 同じtryへ入れると、factory自身の失敗まで
+    // 「取り決めに合わなかった」として扱ってしまう。
+    final requestId = _requestIdFactory();
+
+    // 送る形を組み立てるところにも、取り決めの確認がある。
+    // 取り決めに合わないものは、窓口まで行かずにここで止まる。
+    //
+    // この境界を狭く囲うのは、包む範囲を広げると、
+    // 通信より手前のプログラムの誤りまで unknown に飲み込んでしまうためである。
+    // ここで受け取るのは、組み立ての確認が投げる ArgumentError だけにする。
+    //
+    // Gatewayの上限（長さや形）は通信の境界の取り決めであり、
+    // Domain側の ReflectionThinkingRequest へは移さない。
+    final AiThinkingGatewayRequest gatewayRequest;
+
+    try {
+      gatewayRequest = AiThinkingGatewayRequest.fromThinkingRequest(
+        request,
+        requestId: requestId,
+      );
+    } on ArgumentError catch (_) {
+      // 何が長すぎたかは外へ出さない。Humanの言葉が混ざるためである。
+      throw const ReflectionThinkingException(
+        ReflectionThinkingFailure.unknown,
+      );
+    }
 
     final AiThinkingGatewayResponse response;
 

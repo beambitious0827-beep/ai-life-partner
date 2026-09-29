@@ -394,5 +394,209 @@ void main() {
       expect(support.questions, isNotEmpty);
       expect(client.callCount, 0);
     });
+
+    // -----------------------------------------------------------------
+    // 送る形を組み立てるところで止まった場合。
+    //
+    // Domainとしては正しい頼みごとでも、窓口の取り決めには合わないことがある。
+    // 長さの上限は通信の境界の取り決めであり、Domain側には無いためである。
+    // そのときも、この画面へ返るのは ReflectionThinkingException だけにする。
+    // -----------------------------------------------------------------
+
+    test('感じたことが長すぎる場合は、窓口を呼ばずに共通の失敗として返す', () async {
+      final client = RecordingGatewayClient();
+
+      final assistant = ServerReflectionThinkingAssistant(client: client);
+
+      final feelingText =
+          'あ' * (AiThinkingGatewayContract.maxReflectionTextLength + 1);
+
+      expect(feelingText.length, 4001);
+
+      // Domain側は受け取れる。上限を持っているのは窓口の取り決めだけである。
+      final request = createRequest(
+        feelingText: feelingText,
+        noticedText: null,
+      );
+
+      expect(request.feelingText?.length, 4001);
+
+      await expectLater(
+        assistant.support(request),
+        throwsThinkingFailure(ReflectionThinkingFailure.unknown),
+      );
+
+      // 取り決めに合わないものは、窓口まで行かない。
+      expect(client.callCount, 0);
+    });
+
+    test('気づいたことが長すぎる場合も、同じ境界で止まる', () async {
+      final client = RecordingGatewayClient();
+
+      final assistant = ServerReflectionThinkingAssistant(client: client);
+
+      final noticedText =
+          'い' * (AiThinkingGatewayContract.maxReflectionTextLength + 1);
+
+      expect(noticedText.length, 4001);
+
+      await expectLater(
+        assistant.support(
+          createRequest(feelingText: null, noticedText: noticedText),
+        ),
+        throwsThinkingFailure(ReflectionThinkingFailure.unknown),
+      );
+
+      expect(client.callCount, 0);
+    });
+
+    test('振り返りのIDが長すぎる場合も、同じ境界で止まる', () async {
+      final client = RecordingGatewayClient();
+
+      final assistant = ServerReflectionThinkingAssistant(client: client);
+
+      final reflectionEntryId =
+          'r' * (AiThinkingGatewayContract.maxReflectionEntryIdLength + 1);
+
+      expect(reflectionEntryId.length, 129);
+
+      await expectLater(
+        assistant.support(createRequest(reflectionEntryId: reflectionEntryId)),
+        throwsThinkingFailure(ReflectionThinkingFailure.unknown),
+      );
+
+      expect(client.callCount, 0);
+    });
+
+    test('組み立ての失敗が、ArgumentErrorのまま外へ出ることはない', () async {
+      final client = RecordingGatewayClient();
+
+      final assistant = ServerReflectionThinkingAssistant(client: client);
+
+      final feelingText =
+          'あ' * (AiThinkingGatewayContract.maxReflectionTextLength + 1);
+
+      Object? thrown;
+
+      try {
+        await assistant.support(
+          createRequest(feelingText: feelingText, noticedText: null),
+        );
+      } on Object catch (error) {
+        thrown = error;
+      }
+
+      expect(thrown, isNotNull);
+      expect(thrown, isNot(isA<ArgumentError>()));
+      expect(thrown, isA<ReflectionThinkingException>());
+      expect(
+        (thrown! as ReflectionThinkingException).failure,
+        ReflectionThinkingFailure.unknown,
+      );
+
+      // 何が長すぎたかも、Humanの言葉も、失敗の姿には現れない。
+      expect(thrown.toString().contains('あ'), isFalse);
+      expect(thrown.toString().contains('4001'), isFalse);
+
+      expect(client.callCount, 0);
+    });
+
+    // -----------------------------------------------------------------
+    // 追跡IDを作るところと、送る形を確かめるところの境目。
+    //
+    // 正規化してよいのは「取り決めに合わなかった」ことだけである。
+    // IDを作る仕組み自体が壊れているのは、取り決めの違反ではなく
+    // プログラムの誤りなので、共通の失敗へ言い換えて隠さない。
+    // -----------------------------------------------------------------
+
+    test('追跡IDを作る仕組み自体の失敗は、言い換えずにそのまま伝える', () async {
+      final client = RecordingGatewayClient();
+
+      final assistant = ServerReflectionThinkingAssistant(
+        client: client,
+        requestIdFactory: () => throw ArgumentError('factory failure'),
+      );
+
+      Object? thrown;
+
+      try {
+        await assistant.support(createRequest());
+      } on Object catch (error) {
+        thrown = error;
+      }
+
+      // 組み立ての確認の失敗ではないので、共通の失敗へ変えない。
+      expect(thrown, isA<ArgumentError>());
+      expect(thrown, isNot(isA<ReflectionThinkingException>()));
+      expect((thrown! as ArgumentError).message, 'factory failure');
+
+      expect(client.callCount, 0);
+    });
+
+    test('数えの誤りも、そのまま伝える', () async {
+      // RangeErrorもArgumentErrorの一種である。
+      // 作るところで起きた誤りは、どちらも言い換えない。
+      final client = RecordingGatewayClient();
+
+      final assistant = ServerReflectionThinkingAssistant(
+        client: client,
+        requestIdFactory: () => throw RangeError('range failure'),
+      );
+
+      await expectLater(
+        assistant.support(createRequest()),
+        throwsA(isA<RangeError>()),
+      );
+
+      expect(client.callCount, 0);
+    });
+
+    test('作られた追跡IDが取り決めに合わない場合は、共通の失敗として返す', () async {
+      // factory自体は正常に終わる。合わないのは、返ってきた値である。
+      final client = RecordingGatewayClient();
+
+      final assistant = ServerReflectionThinkingAssistant(
+        client: client,
+        requestIdFactory: () => 'invalid request id',
+      );
+
+      Object? thrown;
+
+      try {
+        await assistant.support(createRequest());
+      } on Object catch (error) {
+        thrown = error;
+      }
+
+      expect(thrown, isA<ReflectionThinkingException>());
+      expect(thrown, isNot(isA<ArgumentError>()));
+      expect(
+        (thrown! as ReflectionThinkingException).failure,
+        ReflectionThinkingFailure.unknown,
+      );
+
+      expect(client.callCount, 0);
+    });
+
+    test('長すぎる追跡IDも、同じ境界で止まる', () async {
+      final client = RecordingGatewayClient();
+
+      final requestId =
+          'a' * (AiThinkingGatewayContract.maxRequestIdLength + 1);
+
+      final assistant = ServerReflectionThinkingAssistant(
+        client: client,
+        requestIdFactory: () => requestId,
+      );
+
+      expect(requestId.length, 65);
+
+      await expectLater(
+        assistant.support(createRequest()),
+        throwsThinkingFailure(ReflectionThinkingFailure.unknown),
+      );
+
+      expect(client.callCount, 0);
+    });
   });
 }
